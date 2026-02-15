@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="robotic_arm_v4_urdf">
+  <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link" />
+
+  <group name="arm">
+    <joint name="Joint1" />
+    <joint name="Joint2" />
+    <joint name="Joint3" />
+    <joint name="Joint4" />
+    <joint name="Joint5" />
+    <joint name="Joint6" />
+  </group>
+
+  <group_state name="home" group="arm">
+    <joint name="Joint1" value="0.0" />
+    <joint name="Joint2" value="0.0" />
+    <joint name="Joint3" value="0.0" />
+    <joint name="Joint4" value="0.0" />
+    <joint name="Joint5" value="0.0" />
+    <joint name="Joint6" value="0.0" />
+  </group_state>
+
+  <!-- Adjacent links are always in contact; disable collision checks for those pairs. -->
+  <disable_collisions link1="base_link" link2="Link0" reason="Adjacent" />
+  <disable_collisions link1="Link0" link2="Link1" reason="Adjacent" />
+  <disable_collisions link1="Link1" link2="J3_J4" reason="Adjacent" />
+  <disable_collisions link1="J3_J4" link2="Link2" reason="Adjacent" />
+  <disable_collisions link1="Link2" link2="J5_J6" reason="Adjacent" />
+  <disable_collisions link1="J5_J6" link2="End_Effector" reason="Adjacent" />
+</robot>
