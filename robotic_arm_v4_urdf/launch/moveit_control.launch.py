@@ -31,6 +31,7 @@ def generate_launch_description() -> LaunchDescription:
     ompl_path = pkg_share / "config" / "ompl_planning.yaml"
     moveit_controllers_path = pkg_share / "config" / "moveit_controllers.yaml"
     moveit_rviz_path = pkg_share / "config" / "moveit.rviz"
+    servo_params_path = pkg_share / "config" / "servo_params.yaml"
 
     robot_description = {"robot_description": _load_text(urdf_path)}
     robot_description_semantic = {"robot_description_semantic": _load_text(srdf_path)}
@@ -79,6 +80,21 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
+    # MoveIt Servo node: handles real-time Cartesian/joint velocity streaming.
+    # Starts after move_group is fully up (4 s delay).
+    servo_node = Node(
+        package="moveit_servo",
+        executable="servo_node_main",
+        name="servo_node",
+        output="screen",
+        parameters=[
+            _load_yaml(servo_params_path),
+            robot_description,
+            robot_description_semantic,
+            robot_description_kinematics,
+        ],
+    )
+
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -97,6 +113,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_moveit_rviz", default_value="true"),
             control_launch,
             TimerAction(period=2.0, actions=[move_group_node]),
+            TimerAction(period=4.0, actions=[servo_node]),
             TimerAction(period=2.0, actions=[rviz_node]),
         ]
     )

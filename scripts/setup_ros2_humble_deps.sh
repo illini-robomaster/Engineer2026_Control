@@ -7,9 +7,15 @@ sudo apt-get install -y \
   ros-humble-joint-state-publisher \
   ros-humble-joint-state-publisher-gui \
   ros-humble-moveit \
+  ros-humble-moveit-servo \
   ros-humble-ros2-control \
   ros-humble-ros2-controllers \
-  ros-humble-xacro
+  ros-humble-xacro \
+  ros-humble-apriltag-ros \
+  ros-humble-usb-cam \
+  ros-humble-tf2-ros \
+  ros-humble-tf2-geometry-msgs \
+  python3-serial
 
 # Some mirrors/images do not publish gazebo_ros package names for Humble.
 # Install Gazebo-related ROS deps only when available.

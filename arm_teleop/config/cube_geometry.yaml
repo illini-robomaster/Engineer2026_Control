@@ -1,0 +1,65 @@
+cube:
+  # Physical size of the cube (meters). Measure edge-to-edge.
+  side_length: 0.06
+
+  # AprilTag family printed on the tags.
+  tag_family: "36h11"
+
+  # Face definitions: one tag per face.
+  #
+  # Cube coordinate frame convention:
+  #   X = right   Y = forward (front face)   Z = up
+  #
+  # Tag mounting convention (all 4 side faces):
+  #   tag Z-axis points outward (away from cube center)
+  #   tag Y-axis points toward cube +Z (top)
+  #
+  # Top (+Z) face:
+  #   tag Z points up, tag Y points toward cube -Y (front)
+  #
+  # Bottom (-Z) face:
+  #   tag Z points down, tag Y points toward cube +Y (back, so tag reads right-side-up when flipped)
+  #
+  # orientation_xyzw: quaternion representing the TAG FRAME orientation inside the CUBE FRAME.
+  #   Computed from: tag_x, tag_y, tag_z expressed in cube frame axes.
+  #   If your physical tags are rotated differently, adjust these quaternions.
+  #   You can also use 'ros2 run tf2_tools view_frames' to verify after launching.
+  #
+  # To re-assign which tag ID goes on which face, change the `id` values below.
+
+  faces:
+    - id: 0
+      face: "+X"
+      position: [0.03, 0.0, 0.0]
+      # tag_x=cube_+Y, tag_y=cube_+Z, tag_z=cube_+X
+      orientation_xyzw: [0.5, 0.5, 0.5, 0.5]
+
+    - id: 1
+      face: "-X"
+      position: [-0.03, 0.0, 0.0]
+      # tag_x=cube_-Y, tag_y=cube_+Z, tag_z=cube_-X
+      orientation_xyzw: [0.5, -0.5, -0.5, 0.5]
+
+    - id: 2
+      face: "+Y"
+      position: [0.0, 0.03, 0.0]
+      # tag_x=cube_-X, tag_y=cube_+Z, tag_z=cube_+Y
+      orientation_xyzw: [0.0, 0.7071, 0.7071, 0.0]
+
+    - id: 3
+      face: "-Y"
+      position: [0.0, -0.03, 0.0]
+      # tag_x=cube_+X, tag_y=cube_+Z, tag_z=cube_-Y
+      orientation_xyzw: [0.7071, 0.0, 0.0, 0.7071]
+
+    - id: 4
+      face: "+Z"
+      position: [0.0, 0.0, 0.03]
+      # tag_x=cube_-X, tag_y=cube_-Y, tag_z=cube_+Z  (tag rotated 180° around Z)
+      orientation_xyzw: [0.0, 0.0, 1.0, 0.0]
+
+    - id: 5
+      face: "-Z"
+      position: [0.0, 0.0, -0.03]
+      # tag_x=cube_-X, tag_y=cube_+Y, tag_z=cube_-Z
+      orientation_xyzw: [0.0, 1.0, 0.0, 0.0]

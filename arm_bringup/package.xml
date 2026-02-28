@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>arm_bringup</name>
+  <version>1.0.0</version>
+  <description>Top-level launch for the full teleoperation system.</description>
+  <maintainer email="TODO@email.com">TODO</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>robotic_arm_v4_urdf</exec_depend>
+  <exec_depend>arm_teleop</exec_depend>
+  <exec_depend>arm_hardware</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <architecture_independent />
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

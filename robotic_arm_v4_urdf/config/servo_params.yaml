@@ -1,0 +1,45 @@
+moveit_servo:
+  use_gazebo: false
+  status_topic: ~/status
+
+  ## Input: TwistStamped on ~/delta_twist_cmds or JointJog on ~/delta_joint_cmds
+  command_in_type: "speed_units"   # twist linear = m/s, angular = rad/s
+  scale:
+    linear: 0.4       # m/s per unit
+    rotational: 0.8   # rad/s per unit
+    joint: 0.5        # rad/s per unit
+
+  cartesian_command_in_topic: ~/delta_twist_cmds
+  joint_command_in_topic: ~/delta_joint_cmds
+  robot_link_command_frame: base_link
+
+  ## Output: JointTrajectory forwarded to arm_controller
+  command_out_type: trajectory_msgs/JointTrajectory
+  publish_period: 0.034      # ~30 Hz
+  low_latency_mode: false
+  command_out_topic: /arm_controller/joint_trajectory
+  joint_topic: /joint_states
+
+  ## Robot config (must match SRDF group and URDF end-effector link)
+  move_group_name: arm
+  planning_frame: base_link
+  ee_frame_name: End_Effector
+
+  ## Safety
+  incoming_command_timeout: 0.1
+  num_outgoing_halt_msgs_to_publish: 4
+  halt_all_joints_in_joint_mode: true
+  halt_all_joints_in_cartesian_mode: true
+
+  ## Singularity protection
+  lower_singularity_threshold: 17.0
+  hard_stop_singularity_threshold: 30.0
+
+  ## Joint limit margin (rad), extra buffer inside URDF limits
+  joint_limit_margin: 0.1
+
+  ## Collision checking (disable for performance; enable if collisions are a concern)
+  use_collision_checking: false
+
+  ## Set > 0 to cap output speed regardless of input magnitude
+  override_velocity_scaling_factor: 0.0
