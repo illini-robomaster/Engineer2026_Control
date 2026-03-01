@@ -1,0 +1,28 @@
+# Workspace mapping: cube pose in camera frame → EE target in robot base frame
+#
+# Formula:
+#   ee_target = ee_origin + R_cam2robot * diag(scale) * (cube_pos - cam_origin)
+#
+# Tune these values for your physical setup:
+#   cam_origin  — "neutral" cube position in camera frame (metres) where the
+#                 arm should be at ee_origin.  Roughly: hold the cube ~50 cm
+#                 in front of the camera at image centre.
+#   ee_origin   — desired EE position in base_link frame (metres) at neutral.
+#                 Run 'ros2 topic echo /tf' at the home pose to find real values.
+#   scale       — amplification per axis (camera displacement → robot displacement).
+#                 Increase to make arm movements larger relative to cube movement.
+#   cam_to_robot — 3×3 rotation matrix (row-major) mapping camera axes to robot
+#                  base_link axes.
+#
+# Default: camera faces the operator, positioned ~1 m in front and 0.5 m above:
+#   camera axes: X=right, Y=down, Z=forward (depth)
+#   robot axes:  X=forward, Y=left, Z=up
+#   → cam_z → robot_x,  cam_x → robot_-y,  cam_-y → robot_z
+workspace:
+  cam_origin: [0.0, 0.0, 0.5]
+  ee_origin:  [0.426, 0.0, 0.395]
+  scale: [1.0, 1.0, 1.0]
+  cam_to_robot:
+    [ 0.0,  0.0,  1.0,
+     -1.0,  0.0,  0.0,
+      0.0, -1.0,  0.0]

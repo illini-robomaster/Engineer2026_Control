@@ -22,7 +22,7 @@ setup(
     license='BSD',
     entry_points={
         'console_scripts': [
-            'apriltag_teleop_node = arm_teleop.apriltag_teleop_node:main',
+            'socket_teleop_node = arm_teleop.socket_teleop_node:main',
             'keyboard_teleop_node = arm_teleop.keyboard_teleop_node:main',
         ],
     },

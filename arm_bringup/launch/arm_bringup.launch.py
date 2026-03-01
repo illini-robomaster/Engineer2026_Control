@@ -4,8 +4,10 @@ Top-level bringup: starts the complete teleoperation system.
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │  INPUT LAYER                                                         │
-│  apriltag_teleop_node  ─┐                                           │
-│  keyboard_teleop_node  ─┤──► /servo_node/delta_twist_cmds           │
+│  socket_teleop_node  ───────────────────────────────────────────────│
+│    (receives 6D target pose from arm_vision via TCP socket)          │
+│  keyboard_teleop_node  ─┐                                           │
+│                          ├──► /servo_node/delta_twist_cmds           │
 │                          └──► /servo_node/delta_joint_cmds          │
 ├─────────────────────────────────────────────────────────────────────┤
 │  PLANNING LAYER (MoveIt2)                                            │
@@ -21,19 +23,21 @@ Launch arguments:
   use_real_robot   : true → start UART bridge; false → sim only (default: false)
   uart_port        : UART device path                         (default: /dev/ttyS3)
   baud_rate        : UART baud rate                           (default: 115200)
-  camera_device    : USB camera device                        (default: /dev/video0)
-  camera_frame     : TF frame of the camera                   (default: camera_link)
-  tag_size         : AprilTag tag size in metres              (default: 0.05)
+  socket_host      : TCP bind address for pose socket         (default: 0.0.0.0)
+  socket_port      : TCP bind port for pose socket            (default: 9999)
   use_moveit_rviz  : show MoveIt RViz panel                   (default: true)
 
 Quick-start (simulation only):
   ros2 launch arm_bringup arm_bringup.launch.py
 
-With real robot (set your UART port first in arm_hardware/config/hardware_params.yaml):
+With real robot:
   ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS3
 
 Keyboard debug (run in a SEPARATE terminal after bringup is up):
   source install/setup.bash && ros2 run arm_teleop keyboard_teleop_node
+
+Start arm_vision client (no ROS needed, separate terminal):
+  cd arm_vision && python main.py run
 """
 
 from pathlib import Path
@@ -57,9 +61,8 @@ def generate_launch_description():
     use_real_robot  = LaunchConfiguration('use_real_robot')
     uart_port       = LaunchConfiguration('uart_port')
     baud_rate       = LaunchConfiguration('baud_rate')
-    camera_device   = LaunchConfiguration('camera_device')
-    camera_frame    = LaunchConfiguration('camera_frame')
-    tag_size        = LaunchConfiguration('tag_size')
+    socket_host     = LaunchConfiguration('socket_host')
+    socket_port     = LaunchConfiguration('socket_port')
     use_moveit_rviz = LaunchConfiguration('use_moveit_rviz')
 
     # ── MoveIt2 + ros2_control + servo_node + RViz ───────────────────────────
@@ -71,14 +74,13 @@ def generate_launch_description():
         }.items(),
     )
 
-    # ── AprilTag camera + teleop nodes ────────────────────────────────────────
+    # ── Socket teleop node (receives poses from arm_vision client) ────────────
     teleop_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(arm_teleop_share / 'launch' / 'teleop.launch.py')),
         launch_arguments={
-            'camera_device': camera_device,
-            'camera_frame':  camera_frame,
-            'tag_size':      tag_size,
+            'host': socket_host,
+            'port': socket_port,
         }.items(),
     )
 
@@ -97,9 +99,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_real_robot',  default_value='false'),
         DeclareLaunchArgument('uart_port',       default_value='/dev/ttyS3'),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
-        DeclareLaunchArgument('camera_device',   default_value='/dev/video0'),
-        DeclareLaunchArgument('camera_frame',    default_value='camera_link'),
-        DeclareLaunchArgument('tag_size',        default_value='0.05'),
+        DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
+        DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),
 
         moveit_launch,

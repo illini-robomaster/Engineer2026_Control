@@ -1,13 +1,12 @@
-apriltag_teleop_node:
+socket_teleop_node:
   ros__parameters:
+    # TCP socket the arm_vision client connects to
+    host: "0.0.0.0"   # bind all interfaces; use "127.0.0.1" for localhost only
+    port: 9999
+
     # TF frame names
-    camera_frame: "camera_link"
     ee_frame: "End_Effector"
     base_frame: "base_link"
-
-    # TF frame name for each detected tag.
-    # apriltag_ros 3.x publishes frames named "<family>:<id>", e.g. "36h11:0".
-    tag_frame_prefix: "36h11:"
 
     # Proportional controller gains (servo sends these as speed commands)
     kp_linear: 1.5      # m/s per m of position error
@@ -21,41 +20,12 @@ apriltag_teleop_node:
     deadband_pos_m: 0.008      # 8 mm
     deadband_rot_rad: 0.05     # ~3 degrees
 
-    # If no tag is detected for this many seconds, publish a zero twist (halt servo)
+    # If no message is received for this many seconds, publish zero twist (halt servo)
     detection_timeout_s: 0.4
 
-    # Whether to also control end-effector orientation from cube rotation.
+    # Whether to also control end-effector orientation from the received quaternion.
     # false = only position is controlled; orientation stays at whatever MoveIt last set.
     control_orientation: false
-
-    # ── Workspace mapping ─────────────────────────────────────────────────────
-    # The cube is observed in camera space. We map cube position → desired EE
-    # position in base_link frame using an affine transform:
-    #
-    #   ee_target = ee_origin + R_cam2robot * diag(scale) * (cube_pos - cam_origin)
-    #
-    # cam_origin:   "neutral" cube position in camera frame where arm is at ee_origin.
-    #               Roughly: hold cube ~50 cm in front of the camera at image centre.
-    # ee_origin:    Desired EE position (base_link frame) when cube is at cam_origin.
-    #               Use 'ros2 topic echo /tf' at home pose to find the real value.
-    # scale:        Amplification per axis (camera displacement → robot displacement).
-    # cam_to_robot: 3×3 rotation matrix (row-major) mapping camera axes to base_link axes.
-    #
-    # Default mapping for a camera facing the operator:
-    #   camera: X=right, Y=down, Z=forward (depth)
-    #   robot:  X=forward, Y=left, Z=up
-    #   → cam_z → robot_x, cam_x → robot_-y, cam_-y → robot_z
-    #
-    workspace:
-      cam_origin: [0.0, 0.0, 0.5]     # neutral cube position in camera frame (m)
-      ee_origin:  [0.426, 0.0, 0.395]     # corresponding EE position in base_link (m) — TUNE THIS
-      scale: [1.0, 1.0, 1.0]          # cam displacement → EE displacement scale
-
-      # Row-major 3×3: row i = which camera axes sum to robot axis i
-      # Default: cam[z]→robot[x], cam[x]→robot[-y], cam[-y]→robot[z]
-      cam_to_robot: [ 0.0,  0.0,  1.0,
-                     -1.0,  0.0,  0.0,
-                      0.0, -1.0,  0.0]
 
 keyboard_teleop_node:
   ros__parameters:

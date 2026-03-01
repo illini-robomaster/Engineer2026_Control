@@ -1,0 +1,5 @@
+opencv-python>=4.5
+numpy>=1.21
+pupil-apriltags>=1.0.4
+scipy>=1.7
+pyyaml>=5.4
