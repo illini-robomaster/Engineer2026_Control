@@ -35,12 +35,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/base_link.STL" />
+        <box size="0.15 0.05 0.15" />
       </geometry>
     </collision>
   </link>
@@ -75,12 +72,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Link0: spans 73 mm in local Y to Joint2 -->
+      <origin xyz="0 0.072 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/Link0.STL" />
+        <box size="0.12 0.12 0.12" />
       </geometry>
     </collision>
   </link>
@@ -133,12 +128,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Link1: diagonal arm, Joint3 offset (-0.208, 0.244, 0); bounding box centred midway -->
+      <origin xyz="-0.104 0.122 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/Link1.STL" />
+        <box size="0.24 0.28 0.08" />
       </geometry>
     </collision>
   </link>
@@ -191,12 +184,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- J3_J4: spans 151 mm in local Y to Joint4 -->
+      <origin xyz="0 0.075 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/J3_J4.STL" />
+        <box size="0.10 0.16 0.10" />
       </geometry>
     </collision>
   </link>
@@ -249,12 +240,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Link2: spans 247 mm in local Y to Joint5 -->
+      <origin xyz="0 0.124 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/Link2.STL" />
+        <box size="0.08 0.26 0.08" />
       </geometry>
     </collision>
   </link>
@@ -307,12 +296,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- J5_J6: spans 28 mm in local Y to Joint6 -->
+      <origin xyz="0 0.014 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/J5_J6.STL" />
+        <box size="0.08 0.04 0.08" />
       </geometry>
     </collision>
   </link>
@@ -365,12 +352,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://robotic_arm_v4_urdf/meshes/End_Effector.STL" />
+        <box size="0.06 0.06 0.06" />
       </geometry>
     </collision>
   </link>
@@ -420,7 +404,9 @@
     </joint>
     <joint name="Joint5">
       <command_interface name="position" />
-      <state_interface name="position" />
+      <state_interface name="position">
+        <param name="initial_value">0.5</param>
+      </state_interface>
       <state_interface name="velocity" />
     </joint>
     <joint name="Joint6">

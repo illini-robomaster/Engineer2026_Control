@@ -48,7 +48,7 @@ apriltag_teleop_node:
     #
     workspace:
       cam_origin: [0.0, 0.0, 0.5]     # neutral cube position in camera frame (m)
-      ee_origin:  [0.2, 0.0, 0.3]     # corresponding EE position in base_link (m) — TUNE THIS
+      ee_origin:  [0.426, 0.0, 0.395]     # corresponding EE position in base_link (m) — TUNE THIS
       scale: [1.0, 1.0, 1.0]          # cam displacement → EE displacement scale
 
       # Row-major 3×3: row i = which camera axes sum to robot axis i
