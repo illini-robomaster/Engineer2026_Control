@@ -35,9 +35,9 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0" />
+      <origin xyz="0.025 0 -0.03" rpy="0 0 0" />
       <geometry>
-        <box size="0.15 0.05 0.15" />
+        <box size="0.2 0.10 0.07" />
       </geometry>
     </collision>
   </link>
@@ -73,9 +73,9 @@
     </visual>
     <collision>
       <!-- Link0: spans 73 mm in local Y to Joint2 -->
-      <origin xyz="0 0.072 0" rpy="0 0 0" />
+      <origin xyz="0 0.072 0.01" rpy="0 0 0" />
       <geometry>
-        <box size="0.12 0.12 0.12" />
+        <box size="0.12 0.12 0.07" />
       </geometry>
     </collision>
   </link>
@@ -129,9 +129,9 @@
     </visual>
     <collision>
       <!-- Link1: diagonal arm, Joint3 offset (-0.208, 0.244, 0); bounding box centred midway -->
-      <origin xyz="-0.104 0.122 0" rpy="0 0 0" />
+      <origin xyz="-0.104 0.122 -0.055" rpy="0 0 0.71" />
       <geometry>
-        <box size="0.24 0.28 0.08" />
+        <box size="0.08 0.40 0.035" />
       </geometry>
     </collision>
   </link>
@@ -185,9 +185,9 @@
     </visual>
     <collision>
       <!-- J3_J4: spans 151 mm in local Y to Joint4 -->
-      <origin xyz="0 0.075 0" rpy="0 0 0" />
+      <origin xyz="0.0 0.04 0" rpy="0 0 0" />
       <geometry>
-        <box size="0.10 0.16 0.10" />
+        <box size="0.065 0.20 0.16" />
       </geometry>
     </collision>
   </link>
@@ -241,9 +241,9 @@
     </visual>
     <collision>
       <!-- Link2: spans 247 mm in local Y to Joint5 -->
-      <origin xyz="0 0.124 0" rpy="0 0 0" />
+      <origin xyz="0 0.10 0" rpy="0 0 0" />
       <geometry>
-        <box size="0.08 0.26 0.08" />
+        <box size="0.12 0.20 0.08" />
       </geometry>
     </collision>
   </link>
@@ -297,9 +297,9 @@
     </visual>
     <collision>
       <!-- J5_J6: spans 28 mm in local Y to Joint6 -->
-      <origin xyz="0 0.014 0" rpy="0 0 0" />
+      <origin xyz="0 0 0" rpy="0 1.57 0" />
       <geometry>
-        <box size="0.08 0.04 0.08" />
+        <cylinder radius="0.04" length="0.14" />
       </geometry>
     </collision>
   </link>
@@ -352,9 +352,9 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0" />
+      <origin xyz="0 0.09 0" rpy="0 0 0" />
       <geometry>
-        <box size="0.06 0.06 0.06" />
+        <box size="0.15 0.14 0.06" />
       </geometry>
     </collision>
   </link>
