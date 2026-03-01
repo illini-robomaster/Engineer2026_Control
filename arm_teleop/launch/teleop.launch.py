@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Teleop launch: starts apriltag_ros (camera → tag detection), the
-AprilTag cube teleop node, and optionally the keyboard teleop node.
+Teleop launch: starts apriltag_ros (camera → tag detection) and the
+AprilTag cube teleop node.
 
 Args:
   camera_device   : USB video device, default /dev/video0
   camera_frame    : TF frame for the camera, default camera_link
   tag_size        : AprilTag size in metres, default 0.05
-  use_keyboard    : also launch keyboard_teleop_node, default false
-  use_rviz        : show camera image in RViz (requires usb_cam image_view), default false
+
+NOTE — keyboard teleop must be run in a separate terminal (it needs a real TTY):
+  source install/setup.bash
+  ros2 run arm_teleop keyboard_teleop_node
 """
 
 from pathlib import Path
@@ -16,7 +18,6 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -28,7 +29,6 @@ def generate_launch_description():
     camera_device = LaunchConfiguration('camera_device')
     camera_frame  = LaunchConfiguration('camera_frame')
     tag_size      = LaunchConfiguration('tag_size')
-    use_keyboard  = LaunchConfiguration('use_keyboard')
 
     # ── Camera node (usb_cam) ─────────────────────────────────────────────────
     # Publishes /image_raw and /camera_info.
@@ -102,26 +102,13 @@ def generate_launch_description():
         parameters=[teleop_params, {'camera_frame': camera_frame}],
     )
 
-    # ── Keyboard teleop node (optional) ──────────────────────────────────────
-    keyboard_teleop = Node(
-        package='arm_teleop',
-        executable='keyboard_teleop_node',
-        name='keyboard_teleop_node',
-        output='screen',
-        condition=IfCondition(use_keyboard),
-        parameters=[teleop_params],
-        prefix='xterm -e',   # launch in its own terminal window
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument('camera_device', default_value='/dev/video0'),
         DeclareLaunchArgument('camera_frame',  default_value='camera_link'),
         DeclareLaunchArgument('tag_size',      default_value='0.05'),
-        DeclareLaunchArgument('use_keyboard',  default_value='false'),
 
         camera_tf_node,
         camera_node,
         apriltag_node,
         apriltag_teleop,
-        keyboard_teleop,
     ])

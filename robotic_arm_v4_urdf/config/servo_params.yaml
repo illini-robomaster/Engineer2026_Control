@@ -26,7 +26,7 @@ moveit_servo:
   ee_frame_name: End_Effector
 
   ## Safety
-  incoming_command_timeout: 0.1
+  incoming_command_timeout: 0.5
   num_outgoing_halt_msgs_to_publish: 4
   halt_all_joints_in_joint_mode: true
   halt_all_joints_in_cartesian_mode: true

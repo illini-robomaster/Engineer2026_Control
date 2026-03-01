@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -115,5 +115,14 @@ def generate_launch_description() -> LaunchDescription:
             TimerAction(period=2.0, actions=[move_group_node]),
             TimerAction(period=4.0, actions=[servo_node]),
             TimerAction(period=2.0, actions=[rviz_node]),
+            # MoveIt Servo 2.5.x starts paused; call start_servo once it is initialised.
+            TimerAction(period=6.0, actions=[
+                ExecuteProcess(
+                    cmd=['ros2', 'service', 'call',
+                         '/servo_node/start_servo',
+                         'std_srvs/srv/Trigger', '{}'],
+                    output='screen',
+                )
+            ]),
         ]
     )

@@ -33,9 +33,6 @@ import tty
 import rclpy
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
-from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import MotionPlanRequest, WorkspaceParameters, RobotState
-from rclpy.action import ActionClient
 from rclpy.node import Node
 
 
