@@ -22,6 +22,7 @@ import time
 
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +124,23 @@ def cmd_run(args: argparse.Namespace):
                         f'{ee_pos_disp[1]:.3f}, {ee_pos_disp[2]:.3f}) m',
                         (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 0), 2,
                     )
+
+                    cv2.putText(
+                        vis,
+                        f'Cube Pose: x={cube_pos[0]:.3f} y={cube_pos[1]:.3f} z={cube_pos[2]:.3f}',
+                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2
+                    )
+
+                    r = Rotation.from_quat(cube_quat)
+                    # Convert to roll-pitch-yaw (intrinsic or extrinsic depending on convention)
+                    # Using 'xyz' as standard roll-pitch-yaw
+                    roll, pitch, yaw = r.as_euler('xyz', degrees=True)
+                    cv2.putText(
+                        vis,
+                        f'Rot (deg): r={roll:.1f} p={pitch:.1f} y={yaw:.1f}',
+                        (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2
+                    )
+
 
                 elapsed = time.monotonic() - t0
                 fps = frame_count / max(elapsed, 1e-3)

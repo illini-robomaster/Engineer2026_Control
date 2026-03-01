@@ -19,9 +19,9 @@
 #   robot axes:  X=forward, Y=left, Z=up
 #   → cam_z → -robot_x,  cam_x → robot_y,  cam_y → -robot_z
 workspace:
-  cam_origin: [0.0, 0.0, 0.3]
+  cam_origin: [0.0, 0.0, 0.15]
   ee_origin:  [0.426, 0.0, 0.395]
-  scale: [1.0, 1.0, 1.0]
+  scale: [2.0, 2.0, 2.0]
   cam_to_robot:
     [ 0.0,  0.0,  -1.0,
      1.0,  0.0,  0.0,
