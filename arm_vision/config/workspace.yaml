@@ -17,12 +17,12 @@
 # Default: camera faces the operator, positioned ~1 m in front and 0.5 m above:
 #   camera axes: X=right, Y=down, Z=forward (depth)
 #   robot axes:  X=forward, Y=left, Z=up
-#   → cam_z → robot_x,  cam_x → robot_-y,  cam_-y → robot_z
+#   → cam_z → -robot_x,  cam_x → robot_y,  cam_y → -robot_z
 workspace:
-  cam_origin: [0.0, 0.0, 0.5]
+  cam_origin: [0.0, 0.0, 0.3]
   ee_origin:  [0.426, 0.0, 0.395]
   scale: [1.0, 1.0, 1.0]
   cam_to_robot:
-    [ 0.0,  0.0,  1.0,
-     -1.0,  0.0,  0.0,
+    [ 0.0,  0.0,  -1.0,
+     1.0,  0.0,  0.0,
       0.0, -1.0,  0.0]

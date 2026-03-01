@@ -48,7 +48,7 @@ def cmd_calibrate_cube(args: argparse.Namespace):
     run(
         device=args.device,
         tag_family=args.tag_family,
-        side_length=args.side_length,
+        tag_size=args.tag_size,
         camera_cal=args.camera_cal,
         output=args.output,
     )
@@ -168,9 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
     cc = sub.add_parser('calibrate-camera',
                         help='Calibrate camera with a checkerboard.')
     cc.add_argument('--device',      type=int,   default=0)
-    cc.add_argument('--cols',        type=int,   default=9,
+    cc.add_argument('--cols',        type=int,   default=8,
                     help='Inner corners along wide axis (default: 9)')
-    cc.add_argument('--rows',        type=int,   default=6,
+    cc.add_argument('--rows',        type=int,   default=5,
                     help='Inner corners along short axis (default: 6)')
     cc.add_argument('--square-size', type=float, default=0.025,
                     dest='square_size',
@@ -182,9 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Calibrate 5-face AprilTag cube geometry.')
     cb.add_argument('--device',      type=int,   default=0)
     cb.add_argument('--tag-family',  default='tag36h11', dest='tag_family')
-    cb.add_argument('--side-length', type=float, default=0.06,
-                    dest='side_length',
-                    help='Approximate cube side in metres (default: 0.06)')
+    cb.add_argument('--tag-size', type=float, default=0.032,
+                    dest='tag_size',
+                    help='AprilTag black-square side in metres (default: 0.032)')
     cb.add_argument('--camera-cal',  default='data/camera_calibration.yaml',
                     dest='camera_cal')
     cb.add_argument('--output',      default='data/cube_config.yaml')

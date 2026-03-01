@@ -17,6 +17,18 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+# ── Rotation helpers ─────────────────────────────────────────────────────────
+
+def _nearest_rotation(R: np.ndarray) -> np.ndarray:
+    """Project an approximate rotation matrix onto SO(3) via SVD."""
+    U, _, Vt = np.linalg.svd(R)
+    R_clean = U @ Vt
+    if np.linalg.det(R_clean) < 0:
+        U[:, -1] *= -1
+        R_clean = U @ Vt
+    return R_clean
+
+
 # ── Quaternion helpers (xyzw convention, matching scipy) ─────────────────────
 
 def _qmul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -77,16 +89,17 @@ class CubeDetector:
         self._cy   = float(camera_matrix[1, 2])
 
         cfg   = cube_config
-        self._side   = float(cfg['side_length'])
-        self._family = cfg.get('tag_family', 'tag36h11')
+        self._tag_size = float(cfg.get('tag_size', cfg.get('side_length', 0.032)))
+        self._family   = cfg.get('tag_family', 'tag36h11')
 
-        # face_data[tag_id] = {'pos': np.array [x,y,z], 'q': np.array [x,y,z,w]}
+        # tag_data[tag_id] = {'pos': np.array [x,y,z], 'q': np.array [x,y,z,w]}
         # Both are the tag's pose in the cube frame.
+        # Supports both 'tags' (new format) and 'faces' (old format).
         self._face: dict[int, dict] = {}
-        for face in cfg['faces']:
-            tid = int(face['id'])
-            pos = np.array(face['position'], dtype=float)
-            q   = np.array(face['orientation_xyzw'], dtype=float)
+        for entry in cfg.get('tags', cfg.get('faces', [])):
+            tid = int(entry['id'])
+            pos = np.array(entry['position'], dtype=float)
+            q   = np.array(entry['orientation_xyzw'], dtype=float)
             q  /= np.linalg.norm(q)
             self._face[tid] = {'pos': pos, 'q': q}
 
@@ -122,7 +135,7 @@ class CubeDetector:
             gray,
             estimate_tag_pose=True,
             camera_params=(self._fx, self._fy, self._cx, self._cy),
-            tag_size=self._side,
+            tag_size=self._tag_size,
         )
 
         positions:   list[np.ndarray] = []
@@ -137,8 +150,9 @@ class CubeDetector:
 
             # pupil-apriltags: pose_R, pose_t map FROM tag frame TO camera frame
             #   p_cam = R * p_tag + t
-            R_tag_to_cam = d.pose_R                 # 3×3
-            t_tag_in_cam = d.pose_t.reshape(3)      # tag origin in camera frame
+            # Project onto SO(3) — numerical noise can give det < 0
+            R_tag_to_cam = _nearest_rotation(d.pose_R)  # 3×3
+            t_tag_in_cam = d.pose_t.reshape(3)           # tag origin in camera frame
 
             # Tag orientation in camera frame as quaternion [xyzw]
             q_tag_cam = Rotation.from_matrix(R_tag_to_cam).as_quat()
