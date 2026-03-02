@@ -39,7 +39,7 @@ class UartBridgeNode(Node):
         super().__init__('uart_bridge_node')
 
         # ── Parameters ────────────────────────────────────────────────────────
-        self.declare_parameter('port', '/dev/ttyS3')
+        self.declare_parameter('port', '/dev/ttyS4')
         self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('serial_timeout', 0.05)
         self.declare_parameter('joint_names',

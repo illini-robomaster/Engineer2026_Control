@@ -31,9 +31,9 @@ moveit_servo:
   halt_all_joints_in_joint_mode: true
   halt_all_joints_in_cartesian_mode: true
 
-  ## Singularity protection
-  lower_singularity_threshold: 17.0
-  hard_stop_singularity_threshold: 30.0
+  ## Singularity protection — disabled; velocity clamping is handled by the STM32.
+  lower_singularity_threshold: 1000.0
+  hard_stop_singularity_threshold: 1000.0
 
   ## Joint limit margin (rad), extra buffer inside URDF limits
   joint_limit_margin: 0.1

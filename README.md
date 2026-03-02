@@ -93,7 +93,7 @@ ros2 launch arm_bringup arm_bringup.launch.py
 With real robot:
 
 ```bash
-ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS3
+ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS4
 ```
 
 Headless (no RViz):

@@ -25,7 +25,7 @@ socket_teleop_node:
 
     # Whether to also control end-effector orientation from the received quaternion.
     # false = only position is controlled; orientation stays at whatever MoveIt last set.
-    control_orientation: false
+    control_orientation: true
 
 keyboard_teleop_node:
   ros__parameters:

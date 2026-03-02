@@ -37,6 +37,7 @@ from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
 from rclpy.time import Time
 import tf2_ros
+from scipy.spatial.transform import Rotation
 
 
 # ── Pure-numpy quaternion helpers (xyzw convention) ──────────────────────────
@@ -88,7 +89,7 @@ class SocketTeleopNode(Node):
         self.declare_parameter('deadband_pos_m', 0.008)
         self.declare_parameter('deadband_rot_rad', 0.05)
         self.declare_parameter('detection_timeout_s', 0.4)
-        self.declare_parameter('control_orientation', False)
+        self.declare_parameter('control_orientation', True)
 
         self._host        = self.get_parameter('host').value
         self._port        = self.get_parameter('port').value
@@ -117,6 +118,14 @@ class SocketTeleopNode(Node):
         self._target_quat: Optional[np.ndarray] = None  # [x, y, z, w]
         self._last_recv_time: float = 0.0
 
+        # ── Diagnostics counters ───────────────────────────────────────────────
+        self._diag_lock        = threading.Lock()
+        self._recv_count       = 0   # socket messages received since last report
+        self._pub_count        = 0   # twist messages published since last report
+        self._tf_fail_count    = 0   # TF lookup failures since last report
+        self._last_diag_time   = time.monotonic()
+        self._first_msg_logged = False
+
         # ── Socket server (background thread) ─────────────────────────────────
         self._srv_thread = threading.Thread(
             target=self._socket_server, daemon=True)
@@ -125,8 +134,14 @@ class SocketTeleopNode(Node):
         # ── Control loop at 30 Hz ─────────────────────────────────────────────
         self.create_timer(1.0 / 30.0, self._control_loop)
 
+        # ── Diagnostics log every 2 s ─────────────────────────────────────────
+        self.create_timer(2.0, self._diag_loop)
+
         self.get_logger().info(
-            f'socket_teleop_node ready — listening on {self._host}:{self._port}')
+            f'socket_teleop_node ready — listening on {self._host}:{self._port}  '
+            f'control_orientation={self._ctrl_orient}  '
+            f'kp_lin={self._kp_lin}  kp_ang={self._kp_ang}  '
+            f'deadband_rot={math.degrees(self._db_rot):.1f}°')
 
     # ── Socket server ─────────────────────────────────────────────────────────
 
@@ -180,11 +195,24 @@ class SocketTeleopNode(Node):
                              float(msg['qz']), float(msg['qw'])], dtype=float)
             n = np.linalg.norm(quat)
             if n < 1e-6:
+                self.get_logger().warn('Received near-zero quaternion — message dropped.')
                 return
+            quat /= n
             with self._lock:
                 self._target_pos  = pos
-                self._target_quat = quat / n
+                self._target_quat = quat
                 self._last_recv_time = time.monotonic()
+                first = not self._first_msg_logged
+                self._first_msg_logged = True
+            with self._diag_lock:
+                self._recv_count += 1
+            if first:
+                rpy = Rotation.from_quat(quat).as_euler('xyz', degrees=True)
+                self.get_logger().info(
+                    f'[socket] First message received  '
+                    f'pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})  '
+                    f'quat=({quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f})  '
+                    f'rpy=({rpy[0]:.1f}°, {rpy[1]:.1f}°, {rpy[2]:.1f}°)')
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             self.get_logger().warn(f'Bad socket message: {exc}  raw={line[:80]}')
 
@@ -204,7 +232,9 @@ class SocketTeleopNode(Node):
         try:
             tf = self._tf_buf.lookup_transform(
                 self._base_frame, self._ee_frame, Time())
-        except Exception:
+        except Exception as exc:
+            with self._diag_lock:
+                self._tf_fail_count += 1
             self._publish_zero()
             return
 
@@ -225,9 +255,11 @@ class SocketTeleopNode(Node):
 
         # ── Orientation P-controller (optional) ───────────────────────────────
         angular = np.zeros(3)
+        rot_err_deg = 0.0
         if self._ctrl_orient:
-            rot_err  = q_error_rotvec(target_quat, cur_quat)
-            rot_norm = float(np.linalg.norm(rot_err))
+            rot_err      = q_error_rotvec(target_quat, cur_quat)
+            rot_norm     = float(np.linalg.norm(rot_err))
+            rot_err_deg  = math.degrees(rot_norm)
             if rot_norm > self._db_rot:
                 angular = self._kp_ang * rot_err
                 spd = float(np.linalg.norm(angular))
@@ -246,11 +278,64 @@ class SocketTeleopNode(Node):
         msg.twist.angular.z = float(angular[2])
         self._twist_pub.publish(msg)
 
+        with self._diag_lock:
+            self._pub_count += 1
+
     def _publish_zero(self):
         msg = TwistStamped()
         msg.header.stamp    = self.get_clock().now().to_msg()
         msg.header.frame_id = self._base_frame
         self._twist_pub.publish(msg)
+        with self._diag_lock:
+            self._pub_count += 1
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+
+    def _diag_loop(self):
+        now = time.monotonic()
+        with self._lock:
+            target_pos  = self._target_pos
+            target_quat = self._target_quat
+            age = now - self._last_recv_time if self._last_recv_time else -1.0
+
+        with self._diag_lock:
+            recv   = self._recv_count;   self._recv_count   = 0
+            pubs   = self._pub_count;    self._pub_count    = 0
+            tf_fails = self._tf_fail_count; self._tf_fail_count = 0
+            dt = now - self._last_diag_time
+            self._last_diag_time = now
+
+        recv_hz = recv / max(dt, 1e-3)
+        pub_hz  = pubs / max(dt, 1e-3)
+
+        if target_pos is None:
+            self.get_logger().info(
+                f'[diag] No socket data yet  '
+                f'pub={pub_hz:.1f}Hz  tf_fails={tf_fails}')
+            return
+
+        rpy_tgt = Rotation.from_quat(target_quat).as_euler('xyz', degrees=True)
+
+        # Current EE pose for orientation error display
+        rot_err_str = 'n/a (ctrl_ori=false)'
+        if self._ctrl_orient:
+            try:
+                tf = self._tf_buf.lookup_transform(
+                    self._base_frame, self._ee_frame, Time())
+                r = tf.transform.rotation
+                cur_q = np.array([r.x, r.y, r.z, r.w])
+                rot_err = q_error_rotvec(target_quat, cur_q)
+                rot_err_str = f'{math.degrees(float(np.linalg.norm(rot_err))):.1f}°'
+            except Exception as exc:
+                rot_err_str = f'TF fail: {exc}'
+
+        self.get_logger().info(
+            f'[diag] socket={recv_hz:.0f}Hz  pub={pub_hz:.0f}Hz  '
+            f'tf_fails={tf_fails}  msg_age={age:.2f}s  '
+            f'ctrl_ori={self._ctrl_orient}  '
+            f'tgt_pos=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})  '
+            f'tgt_rpy=({rpy_tgt[0]:.1f}°,{rpy_tgt[1]:.1f}°,{rpy_tgt[2]:.1f}°)  '
+            f'ori_err={rot_err_str}')
 
 
 def main(args=None):

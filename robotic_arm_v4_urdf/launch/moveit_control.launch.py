@@ -55,6 +55,11 @@ def generate_launch_description() -> LaunchDescription:
         "publish_geometry_updates": True,
         "publish_state_updates": True,
         "publish_transforms_updates": True,
+        # Default is 2.0 Hz which makes RViz update at ~2 Hz.
+        # Set to 30 Hz to match the servo output rate.
+        "publish_planning_scene_hz": 30.0,
+        "publish_state_updates_hz": 30.0,
+        "publish_transforms_updates_hz": 30.0,
     }
 
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")

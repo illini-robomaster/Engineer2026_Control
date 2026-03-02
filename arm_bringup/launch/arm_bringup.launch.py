@@ -97,7 +97,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_real_robot',  default_value='false'),
-        DeclareLaunchArgument('uart_port',       default_value='/dev/ttyS3'),
+        DeclareLaunchArgument('uart_port',       default_value='/dev/ttyS4'),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
