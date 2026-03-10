@@ -63,10 +63,14 @@ def generate_launch_description() -> LaunchDescription:
     }
 
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")
+    use_real_robot  = LaunchConfiguration("use_real_robot")
 
     control_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(pkg_share / "launch" / "control.launch.py")),
-        launch_arguments={"use_rviz": "false"}.items(),
+        launch_arguments={
+            "use_rviz":       "false",
+            "use_real_robot": use_real_robot,
+        }.items(),
     )
 
     move_group_node = Node(
@@ -116,6 +120,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_moveit_rviz", default_value="true"),
+            DeclareLaunchArgument("use_real_robot",  default_value="false"),
             control_launch,
             TimerAction(period=2.0, actions=[move_group_node]),
             TimerAction(period=4.0, actions=[servo_node]),

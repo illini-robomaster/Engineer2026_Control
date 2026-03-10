@@ -5,7 +5,7 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, RegisterEventHandler
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -18,13 +18,28 @@ def generate_launch_description() -> LaunchDescription:
     rviz_path = pkg_share / "config" / "display.rviz"
 
     robot_description = {"robot_description": urdf_path.read_text()}
-    use_rviz = LaunchConfiguration("use_rviz")
+    use_rviz       = LaunchConfiguration("use_rviz")
+    use_real_robot = LaunchConfiguration("use_real_robot")
 
-    control_node = Node(
+    # ── Simulation mode: joint_state_broadcaster → /joint_states (mock) ──────
+    control_node_sim = Node(
         package="controller_manager",
         executable="ros2_control_node",
         parameters=[robot_description, str(controllers_path)],
         output="screen",
+        condition=UnlessCondition(use_real_robot),
+    )
+
+    # ── Real-robot mode: redirect mock → /mock_joint_states ──────────────────
+    # uart_bridge_node (override_joint_states=true) will own /joint_states
+    # with real encoder feedback, which robot_state_publisher and MoveIt read.
+    control_node_real = Node(
+        package="controller_manager",
+        executable="ros2_control_node",
+        parameters=[robot_description, str(controllers_path)],
+        output="screen",
+        remappings=[('/joint_states', '/mock_joint_states')],
+        condition=IfCondition(use_real_robot),
     )
 
     joint_state_broadcaster_spawner = Node(
@@ -55,14 +70,16 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription(
         [
-            DeclareLaunchArgument("use_rviz", default_value="true"),
+            DeclareLaunchArgument("use_rviz",        default_value="true"),
+            DeclareLaunchArgument("use_real_robot",  default_value="false"),
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
                 parameters=[robot_description],
                 output="screen",
             ),
-            control_node,
+            control_node_sim,
+            control_node_real,
             joint_state_broadcaster_spawner,
             RegisterEventHandler(
                 OnProcessExit(

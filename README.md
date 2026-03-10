@@ -112,7 +112,59 @@ python main.py run --host <ros-host-ip> --show
 The client opens the webcam, detects the AprilTag cube, maps its pose to a
 target EE position, and streams it to the ROS `socket_teleop_node` at 30 Hz.
 
-### 3 — Keyboard teleoperation (optional, separate terminal)
+### 3 — Homing (real robot only)
+
+Homing moves each joint to 0 rad in a safe sequential order so the arm starts from a known configuration.  The default order is **Joint2 → Joint1 → Joint3 → Joint4 → Joint5 → Joint6** (shoulder tucks in first, then base rotation returns, then distal joints fold).
+
+Run automatically at startup by adding `run_homing:=true` to the bringup:
+
+```bash
+ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS4 run_homing:=true
+```
+
+Or run it as a standalone node while the stack is already running:
+
+```bash
+source install/setup.bash
+ros2 run arm_hardware homing_node
+```
+
+Key parameters (override with `--ros-args -p name:=value`):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `homing_order` | `[Joint2,Joint1,Joint3,Joint4,Joint5,Joint6]` | Joints to zero, in order |
+| `joint_speed_rad_s` | `0.3` | Max speed used to compute each step duration |
+| `min_duration_s` | `2.0` | Minimum time allocated per joint step |
+| `settle_time_s` | `0.5` | Extra settle wait after each step |
+
+### 4 — Joint Monitor (observe live joint angles)
+
+The joint monitor prints joint angles to the terminal while the arm moves or a MoveIt plan is computed.  It is a lightweight diagnostic tool — no effect on motion.
+
+**Recommended: dedicated terminal (cleanest output)**
+
+```bash
+bash scripts/run_joint_monitor.sh
+```
+
+Or inline via bringup:
+
+```bash
+ros2 launch arm_bringup arm_bringup.launch.py print_joints:=true
+```
+
+Example output:
+
+```
+[CURRENT]   Joint1=  +0.00°  Joint2= -45.23°  Joint3= +12.10°  Joint4=  +0.00°  Joint5=  +5.50°  Joint6=  +0.00°
+[PLAN GOAL] Joint1=  +0.00°  Joint2=  +0.00°  Joint3=  +0.00°  Joint4=  +0.00°  Joint5=  +0.00°  Joint6=  +0.00°
+```
+
+- **`[CURRENT]`** — updates in-place at each `/joint_states` tick (live arm position).
+- **`[PLAN GOAL]`** — printed whenever MoveIt computes a plan (drag the interactive marker in RViz and click **Plan**).
+
+### 5 — Keyboard teleoperation (optional, separate terminal)
 
 ```bash
 source install/setup.bash
@@ -181,6 +233,8 @@ Edit `arm_vision/config/workspace.yaml` to match your physical setup:
 | `socket_host` | `0.0.0.0` | TCP bind address for the pose socket |
 | `socket_port` | `9999` | TCP bind port for the pose socket |
 | `use_moveit_rviz` | `true` | Show MoveIt2 RViz panel |
+| `run_homing` | `false` | Run sequential homing on startup (real robot only) |
+| `print_joints` | `false` | Print live joint angles + MoveIt plan goals to terminal |
 
 ---
 

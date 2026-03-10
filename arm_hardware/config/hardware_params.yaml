@@ -1,10 +1,11 @@
 uart_bridge_node:
   ros__parameters:
     # ── UART port ──────────────────────────────────────────────────────────────
-    # Set this to the correct Orange Pi UART device connected to the STM32.
-    # Common values: /dev/ttyS3, /dev/ttyAMA0, /dev/ttyUSB0
-    # To find it: ls /dev/tty* before and after plugging in the STM32 cable.
-    port: "/dev/ttyS3"      # TODO: update to your actual UART device
+    # Set this to the correct Orange Pi UART device connected to the MCU.
+    # Common values: /dev/ttyCH341USB0 (USB-UART dongle), /dev/ttyS3 (built-in),
+    #                /dev/ttyAMA0, /dev/ttyUSB0
+    # To find it: ls /dev/tty* before and after plugging in the USB-UART cable.
+    port: "/dev/ttyCH341USB0"
     baud_rate: 115200
     serial_timeout: 0.05    # seconds, read timeout per call
 
@@ -19,13 +20,19 @@ uart_bridge_node:
       - Joint6
 
     # ── Wire protocol ─────────────────────────────────────────────────────────
-    # TX frame (Orange Pi → STM32):
-    #   "d1.ddd,d2.ddd,d3.ddd,d4.ddd,d5.ddd,d6.ddd\n"
-    #   Values are joint angles in degrees, 3 decimal places.
+    # use_crc_framing: true  (default, recommended)
+    #   TX: "$d1.ddd,...,d6.ddd*CCCC\n"   (CRC16-MODBUS, 4-char hex suffix)
+    #   RX: same framed format; frames failing CRC are dropped with a WARN log.
     #
-    # RX frame (STM32 → Orange Pi):
-    #   Same CSV format, echoing actual encoder-measured joint angles in degrees.
-    #   If the STM32 sends at a different rate, the reader thread handles it.
+    # use_crc_framing: false  (legacy / MCU firmware not yet updated)
+    #   TX: "d1.ddd,...,d6.ddd\n"         (plain CSV, no header or checksum)
+    #   RX: same plain CSV format.
+    #   Use this temporarily while updating MCU firmware to the framed protocol.
+    use_crc_framing: true     # MCU sends $payload*CCCC\n  — CRC16-MODBUS framing
+
+    # debug_rx: print every raw line and parsed result to the ROS log.
+    # Useful for verifying the MCU is sending correctly.  Disable in production.
+    debug_rx: false
 
     # Rate at which commands are sent to the STM32 (Hz).
     # Should be <= the rate at which MoveIt Servo publishes trajectories (~30 Hz).

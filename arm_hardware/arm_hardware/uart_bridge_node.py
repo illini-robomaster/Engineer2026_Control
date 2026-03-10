@@ -4,16 +4,21 @@ UART bridge node: forwards joint position commands to the STM32 controller
 over a serial port, and publishes STM32 encoder feedback as ROS joint states.
 
 TX frame (Orange Pi → STM32):
-  "d1.ddd,d2.ddd,d3.ddd,d4.ddd,d5.ddd,d6.ddd\n"
-  — joint angles in degrees, 3 decimal places, Joint1..Joint6 order.
+  "$d1.ddd,d2.ddd,d3.ddd,d4.ddd,d5.ddd,d6.ddd*CCCC\n"
+  — '$' start-of-frame, CSV payload in degrees (3 dp), '*' separator,
+    CCCC = CRC16-MODBUS of the CSV payload (uppercase hex, 4 chars), then LF.
 
 RX frame (STM32 → Orange Pi):
-  Same CSV format — actual joint angles in degrees read from encoders.
+  Same framed format — actual joint angles in degrees read from encoders.
+  Frames failing CRC validation are silently dropped with a WARN log.
 
-The node subscribes to /arm_controller/joint_trajectory (produced by MoveIt
-Servo or move_group) and sends the instantaneous target positions at
-`send_rate_hz`.  A background thread reads STM32 feedback and publishes
-/real_joint_states (and optionally /joint_states for MoveIt feedback).
+Command source:
+  Subscribes to /arm_controller/controller_state (JointTrajectoryControllerState,
+  100 Hz) and forwards `desired.positions` to the STM32.  This unified source
+  works for BOTH MoveIt Servo (streamed joint velocity → controller → state) and
+  MoveIt Plan+Execute (action goal → controller → state).  Commands are held
+  off until the first non-trivial motion is detected, so the node cannot
+  accidentally command zero-degrees at startup.
 """
 
 import math
@@ -23,14 +28,28 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+from control_msgs.msg import JointTrajectoryControllerState
 from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory
 
 try:
     import serial
     _SERIAL_AVAILABLE = True
 except ImportError:
     _SERIAL_AVAILABLE = False
+
+
+# ── CRC16-MODBUS (poly=0x8005, init=0xFFFF) ───────────────────────────────────
+def _crc16_modbus(data: bytes) -> int:
+    """Compute CRC16-MODBUS checksum used for TX/RX frame validation."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
 
 
 class UartBridgeNode(Node):
@@ -49,6 +68,8 @@ class UartBridgeNode(Node):
         self.declare_parameter('command_timeout_s', 0.5)
         self.declare_parameter('publish_real_joint_states', True)
         self.declare_parameter('override_joint_states', False)
+        self.declare_parameter('debug_rx', False)
+        self.declare_parameter('use_crc_framing', True)
 
         self._port       = self.get_parameter('port').value
         self._baud       = self.get_parameter('baud_rate').value
@@ -58,13 +79,21 @@ class UartBridgeNode(Node):
         self._cmd_to     = self.get_parameter('command_timeout_s').value
         self._pub_real   = self.get_parameter('publish_real_joint_states').value
         self._override   = self.get_parameter('override_joint_states').value
+        self._debug_rx   = self.get_parameter('debug_rx').value
+        self._use_crc    = self.get_parameter('use_crc_framing').value
 
         # ── State ─────────────────────────────────────────────────────────────
         self._lock = threading.Lock()
         # Latest desired joint positions in radians, keyed by joint name
         self._latest_cmd: Optional[dict] = None
         self._cmd_time: float = 0.0
-
+        # Safety gate: don't forward until controller has shown non-zero motion.
+        # Prevents commanding 0° at startup before a trajectory is ever sent.
+        self._ctrl_enabled: bool = False        # Last joint positions received from hardware (radians).
+        # Seeded with zeros so /joint_states is always published in override
+        # mode, giving robot_state_publisher a valid TF chain even when no
+        # hardware data has arrived yet.
+        self._last_hw_positions: list = [0.0] * len(self._joints)
         # ── Publishers ────────────────────────────────────────────────────────
         self._real_js_pub = self.create_publisher(
             JointState, '/real_joint_states', 10)
@@ -73,9 +102,14 @@ class UartBridgeNode(Node):
                 JointState, '/joint_states', 10)
 
         # ── Subscriber ────────────────────────────────────────────────────────
+        # Unified command source for both MoveIt Servo and Plan+Execute paths.
+        # JointTrajectoryController publishes desired positions here at the
+        # ros2_control update rate (100 Hz) whenever it is executing a trajectory
+        # (or holding the final position after one completes).
         self.create_subscription(
-            JointTrajectory, '/arm_controller/joint_trajectory',
-            self._traj_cb, 10)
+            JointTrajectoryControllerState,
+            '/arm_controller/controller_state',
+            self._controller_state_cb, 10)
 
         # ── Serial port ───────────────────────────────────────────────────────
         self._ser: Optional['serial.Serial'] = None
@@ -97,7 +131,11 @@ class UartBridgeNode(Node):
         self.create_timer(period, self._send_tick)
 
         self.get_logger().info(
-            f'UART bridge ready: port={self._port}, baud={self._baud}')
+            f'UART bridge ready — using port={self._port}, baud={self._baud}')
+        self.get_logger().info(
+            f'  override_joint_states={self._override}  '
+            f'use_crc_framing={self._use_crc}  '
+            f'debug_rx={self._debug_rx}')
 
     # ── Serial helpers ────────────────────────────────────────────────────────
 
@@ -115,20 +153,37 @@ class UartBridgeNode(Node):
                 f'Set the correct port in hardware_params.yaml and rebuild.')
             self._ser = None
 
-    # ── Trajectory callback ───────────────────────────────────────────────────
+    # ── Controller state callback ─────────────────────────────────────────────
 
-    def _traj_cb(self, msg: JointTrajectory):
-        if not msg.points:
+    def _controller_state_cb(self, msg: JointTrajectoryControllerState) -> None:
+        """Forward desired joint positions from the JointTrajectoryController.
+
+        Covers both paths:
+          • MoveIt Servo  — publishes topic → controller → controller_state
+          • Plan+Execute  — action goal → controller → controller_state
+
+        Safety gate: withholds forwarding until at least one trajectory step
+        with non-trivial velocity has been observed.  This prevents the node
+        from immediately sending the controller's startup-zero state to the
+        STM32 before the operator has deliberately commanded any motion.
+        """
+        if not msg.desired.positions:
             return
 
-        # Use the last trajectory point as the target (appropriate for Servo
-        # which publishes short 1-2 point trajectories at ~30 Hz).
-        last = msg.points[-1]
+        if not self._ctrl_enabled:
+            # Enable once the controller is actively executing a trajectory
+            # (any joint moving faster than 0.1 deg/s).
+            vels = msg.desired.velocities
+            if not (vels and any(abs(v) > math.radians(0.1) for v in vels)):
+                return
+            self._ctrl_enabled = True
+            self.get_logger().info(
+                'Controller motion detected — UART TX enabled.')
+
         positions = {
             name: pos
-            for name, pos in zip(msg.joint_names, last.positions)
+            for name, pos in zip(msg.joint_names, msg.desired.positions)
         }
-
         with self._lock:
             self._latest_cmd = positions
             self._cmd_time = time.monotonic()
@@ -136,6 +191,18 @@ class UartBridgeNode(Node):
     # ── Send timer ────────────────────────────────────────────────────────────
 
     def _send_tick(self):
+        # ── Heartbeat: always publish /joint_states when in override mode ────
+        # This keeps robot_state_publisher's TF chain alive even when the
+        # serial port is unavailable or no UART data has arrived yet.
+        # _last_hw_positions is seeded with zeros and updated by _read_loop.
+        if self._override:
+            js = JointState()
+            js.header.stamp = self.get_clock().now().to_msg()
+            js.name = list(self._joints)
+            with self._lock:
+                js.position = list(self._last_hw_positions)
+            self._js_pub.publish(js)
+
         if self._ser is None:
             return
 
@@ -146,12 +213,17 @@ class UartBridgeNode(Node):
         if cmd is None or age > self._cmd_to:
             return   # no command or stale
 
-        # Build CSV frame: degrees, Joint1..Joint6 order
+        # Build framed TX: $payload*CCCC\n  (or plain CSV if use_crc_framing=false)
         vals_deg = [
             math.degrees(cmd.get(name, 0.0))
             for name in self._joints
         ]
-        line = ','.join(f'{v:.3f}' for v in vals_deg) + '\n'
+        payload = ','.join(f'{v:.3f}' for v in vals_deg)
+        if self._use_crc:
+            crc = _crc16_modbus(payload.encode('ascii'))
+            line = f'${payload}*{crc:04X}\n'
+        else:
+            line = payload + '\n'
 
         try:
             self._ser.write(line.encode('ascii'))
@@ -171,19 +243,65 @@ class UartBridgeNode(Node):
                 if not raw:
                     continue
                 line = raw.decode('ascii', errors='replace').strip()
-                parts = line.split(',')
+
+                if self._debug_rx:
+                    self.get_logger().info(f'[RX raw] {line!r}')
+
+                # ── Frame parsing ─────────────────────────────────────────
+                if self._use_crc:
+                    # New framed format: $payload*CCCC
+                    if not line.startswith('$') or '*' not in line:
+                        self.get_logger().warn(
+                            f'RX bad frame (expected $payload*CCCC): {line!r}')
+                        continue
+                    payload, _, crc_str = line[1:].rpartition('*')
+                    try:
+                        rx_crc = int(crc_str, 16)
+                    except ValueError:
+                        self.get_logger().warn(
+                            f'RX bad CRC field: {line!r}')
+                        continue
+                    expected_crc = _crc16_modbus(payload.encode('ascii'))
+                    if rx_crc != expected_crc:
+                        self.get_logger().warn(
+                            f'RX CRC mismatch: received {rx_crc:04X}, '
+                            f'computed {expected_crc:04X} — frame dropped')
+                        continue
+                else:
+                    # Legacy plain CSV format (no header/CRC)
+                    payload = line
+                # ─────────────────────────────────────────────────────────
+
+                parts = payload.split(',')
                 if len(parts) != len(self._joints):
+                    self.get_logger().warn(
+                        f'RX wrong field count: got {len(parts)}, '
+                        f'expected {len(self._joints)} — payload={payload!r}')
                     continue
                 positions_deg = [float(p) for p in parts]
                 positions_rad = [math.radians(d) for d in positions_deg]
+
+                if self._debug_rx:
+                    deg_str = '  '.join(
+                        f'{n}={d:+.2f}°'
+                        for n, d in zip(self._joints, positions_deg))
+                    self.get_logger().info(f'[RX parsed] {deg_str}')
 
                 js = JointState()
                 js.header.stamp = self.get_clock().now().to_msg()
                 js.name = list(self._joints)
                 js.position = positions_rad
 
+                # Cache for the startup heartbeat (zero-seed until first frame).
+                with self._lock:
+                    self._last_hw_positions = positions_rad
+
                 if self._pub_real:
                     self._real_js_pub.publish(js)
+                # Publish to /joint_states immediately (real-time model update).
+                # The _send_tick heartbeat also publishes at 50 Hz but only uses
+                # the cached zeros on startup; this direct call takes over as
+                # soon as the first UART frame arrives.
                 if self._override:
                     self._js_pub.publish(js)
 

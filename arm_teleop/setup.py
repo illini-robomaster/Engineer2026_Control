@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'socket_teleop_node = arm_teleop.socket_teleop_node:main',
             'keyboard_teleop_node = arm_teleop.keyboard_teleop_node:main',
+            'joint_monitor_node = arm_teleop.joint_monitor_node:main',
         ],
     },
 )

@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'uart_bridge_node = arm_hardware.uart_bridge_node:main',
+            'homing_node = arm_hardware.homing_node:main',
         ],
     },
 )

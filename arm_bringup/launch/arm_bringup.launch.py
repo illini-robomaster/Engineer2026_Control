@@ -26,12 +26,23 @@ Launch arguments:
   socket_host      : TCP bind address for pose socket         (default: 0.0.0.0)
   socket_port      : TCP bind port for pose socket            (default: 9999)
   use_moveit_rviz  : show MoveIt RViz panel                   (default: true)
+  print_joints     : print live joint angles to terminal      (default: false)
+                     shows [CURRENT] at every /joint_states tick and
+                     [PLAN GOAL] whenever a MoveIt plan is published
+  run_homing       : run sequential homing (→ 0 rad) on startup (default: false)
+                     only effective when use_real_robot:=true
+                     order: Joint2 → Joint1 → Joint3 → Joint4 → Joint5 → Joint6
 
 Quick-start (simulation only):
   ros2 launch arm_bringup arm_bringup.launch.py
 
 With real robot:
   ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS3
+
+Print joint angles while using MoveIt (run in a SEPARATE terminal — cleaner output):
+  source install/setup.bash && ros2 run arm_teleop joint_monitor_node
+  # or inline with bringup:
+  ros2 launch arm_bringup arm_bringup.launch.py print_joints:=true
 
 Keyboard debug (run in a SEPARATE terminal after bringup is up):
   source install/setup.bash && ros2 run arm_teleop keyboard_teleop_node
@@ -51,6 +62,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -64,14 +76,15 @@ def generate_launch_description():
     socket_host     = LaunchConfiguration('socket_host')
     socket_port     = LaunchConfiguration('socket_port')
     use_moveit_rviz = LaunchConfiguration('use_moveit_rviz')
+    print_joints    = LaunchConfiguration('print_joints')
+    run_homing      = LaunchConfiguration('run_homing')
 
     # ── MoveIt2 + ros2_control + servo_node + RViz ───────────────────────────
     moveit_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(arm_urdf_share / 'launch' / 'moveit_control.launch.py')),
         launch_arguments={
-            'use_moveit_rviz': use_moveit_rviz,
-        }.items(),
+            'use_moveit_rviz': use_moveit_rviz,            'use_real_robot':  use_real_robot,        }.items(),
     )
 
     # ── Socket teleop node (receives poses from arm_vision client) ────────────
@@ -84,26 +97,38 @@ def generate_launch_description():
         }.items(),
     )
 
+    # ── Joint monitor (optional — prints live joint angles and planned goal) ────
+    joint_monitor_node = Node(
+        package='arm_teleop',
+        executable='joint_monitor_node',
+        output='screen',
+        condition=IfCondition(print_joints),
+    )
+
     # ── UART bridge (real robot only) ─────────────────────────────────────────
     hardware_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(arm_hw_share / 'launch' / 'hardware.launch.py')),
         launch_arguments={
-            'uart_port': uart_port,
-            'baud_rate': baud_rate,
+            'uart_port':  uart_port,
+            'baud_rate':  baud_rate,
+            'run_homing': run_homing,
         }.items(),
         condition=IfCondition(use_real_robot),
     )
 
     return LaunchDescription([
         DeclareLaunchArgument('use_real_robot',  default_value='false'),
-        DeclareLaunchArgument('uart_port',       default_value='/dev/ttyS4'),
+        DeclareLaunchArgument('uart_port',       default_value='/dev/ttyCH341USB0'),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),
+        DeclareLaunchArgument('print_joints',    default_value='false'),
+        DeclareLaunchArgument('run_homing',      default_value='false'),
 
         moveit_launch,
         teleop_launch,
         hardware_launch,
+        joint_monitor_node,
     ])
