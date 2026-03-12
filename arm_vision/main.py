@@ -131,14 +131,18 @@ def cmd_run(args: argparse.Namespace):
                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2
                     )
 
-                    r = Rotation.from_quat(cube_quat)
-                    # Convert to roll-pitch-yaw (intrinsic or extrinsic depending on convention)
-                    # Using 'xyz' as standard roll-pitch-yaw
-                    roll, pitch, yaw = r.as_euler('xyz', degrees=True)
+                    r = Rotation.from_quat(ee_quat)
+                    yaw, pitch, roll = r.as_euler('zyx', degrees=True)
+
                     cv2.putText(
                         vis,
-                        f'Rot (deg): r={roll:.1f} p={pitch:.1f} y={yaw:.1f}',
-                        (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2
+                        f'EE Quat: {ee_quat[0]:.2f}, {ee_quat[1]:.2f}, {ee_quat[2]:.2f}, {ee_quat[3]:.2f}',
+                        (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2
+                    )
+                    cv2.putText(
+                        vis,
+                        f'EE RPY: {roll:.1f}, {pitch:.1f}, {yaw:.1f}',
+                        (10, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2
                     )
 
 
