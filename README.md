@@ -2,7 +2,7 @@
 
 Control stack for the **Illini RoboMaster** Engineer robot (2026 cycle).
 
-This repository contains ROS 2 Humble packages for a **6-DOF robotic arm**: URDF description, ros2\_control setup, MoveIt2 motion planning, and teleoperation via AprilTag cube or keyboard.  It targets an OrangePi SBC communicating with an STM32 motor controller over UART.
+This repository contains ROS 2 Humble packages for a **6-DOF robotic arm**: URDF description, ros2\_control setup, MoveIt2 motion planning, and teleoperation via AprilTag cube or keyboard.  It targets an OrangePi SBC communicating with an MCU (ESP32/STM32) over UART.
 
 The arm is teleoperated using an AprilTag cube held by the operator.  A **standalone Python client** (`arm_vision/`) handles all camera work — calibration, AprilTag detection, and pose estimation — and streams the target end-effector pose to the ROS stack over a plain TCP socket.  No ROS is required on the client machine.
 
@@ -27,7 +27,7 @@ The arm is teleoperated using an AprilTag cube held by the operator.  A **standa
 │                           /servo_node/delta_joint_cmds           │
 │  servo_node (MoveIt2) ──► /arm_controller/joint_trajectory       │
 │  move_group                                                      │
-│  ros2_control         ──► mock_components  OR  UART → STM32      │
+│  ros2_control         ──► mock_components  OR  uart_bridge_node → MCU   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,7 +39,7 @@ The arm is teleoperated using an AprilTag cube held by the operator.  A **standa
 |---|---|
 | `robotic_arm_v4_urdf/` | Robot URDF, ros2\_control config, MoveIt2 config, core launch files |
 | `arm_teleop/` | `socket_teleop_node` (TCP receiver + P-controller) and `keyboard_teleop_node` |
-| `arm_hardware/` | UART bridge node that forwards joint commands to the STM32 |
+| `arm_hardware/` | UART bridge node, homing node — communicate with the MCU over UART |
 | `arm_bringup/` | Top-level launch that ties all ROS packages together |
 | `arm_vision/` | Standalone Python client: camera cal, cube cal, detection, socket sender |
 | `scripts/` | Shell helpers for setup, build, and launch |
@@ -85,21 +85,29 @@ bash scripts/run_ros2_humble_moveit_control.sh
 
 ### 1 — Start the ROS stack
 
+**Simulation only — Plan+Execute via RViz (no hardware, no vision):**
+
 ```bash
 source install/setup.bash
-ros2 launch arm_bringup arm_bringup.launch.py
+ros2 launch arm_bringup arm_bringup.launch.py use_teleop:=false
 ```
 
-With real robot:
+**Real robot — Plan+Execute via RViz (no vision pipeline):**
 
 ```bash
-ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS4
+ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true use_teleop:=false uart_port:=/dev/yourdevice
+```
+
+**Real robot + arm\_vision socket teleop (full system):**
+
+```bash
+ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/yourdevice
 ```
 
 Headless (no RViz):
 
 ```bash
-ros2 launch arm_bringup arm_bringup.launch.py use_moveit_rviz:=false
+ros2 launch arm_bringup arm_bringup.launch.py use_moveit_rviz:=false use_teleop:=false
 ```
 
 ### 2 — Start the arm\_vision client (separate machine or terminal)
@@ -119,7 +127,7 @@ Homing moves each joint to 0 rad in a safe sequential order so the arm starts fr
 Run automatically at startup by adding `run_homing:=true` to the bringup:
 
 ```bash
-ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS4 run_homing:=true
+ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/yourdevice run_homing:=true
 ```
 
 Or run it as a standalone node while the stack is already running:
@@ -164,7 +172,21 @@ Example output:
 - **`[CURRENT]`** — updates in-place at each `/joint_states` tick (live arm position).
 - **`[PLAN GOAL]`** — printed whenever MoveIt computes a plan (drag the interactive marker in RViz and click **Plan**).
 
-### 5 — Keyboard teleoperation (optional, separate terminal)
+### 5 — View-only mode (real arm angles in RViz, no motion commands)
+
+Shows live encoder feedback from the MCU as a moving robot model in RViz.  No motion commands are ever sent to the hardware in this mode.
+
+```bash
+bash scripts/run_view_only.sh --port /dev/yourdevice
+# with raw-frame debug logging:
+bash scripts/run_view_only.sh --port /dev/yourdevice --debug
+```
+
+If `--port` is not given the script prints available `/dev/tty*` devices and exits.
+
+This starts only: `robot_state_publisher` + `uart_bridge_node` (RX only) + RViz(`display.rviz`).
+
+### 6 — Keyboard teleoperation (optional, separate terminal)
 
 ```bash
 source install/setup.bash
@@ -175,6 +197,86 @@ Or:
 
 ```bash
 bash scripts/run_keyboard_teleop.sh
+```
+
+### 7 — MCU Emulator (test without real hardware)
+
+The emulator creates a virtual serial port pair so you can run and test the full ROS stack — homing, Plan+Execute, and vision teleop — without the real robot connected.  It simulates the MCU's motor PID: positions approach the commanded angles with a configurable time constant.
+
+**Terminal 1 — start the emulator:**
+
+```bash
+# All joints at zero (default):
+python3 scripts/mcu_emulator.py
+
+# Start at non-zero positions to test homing:
+python3 scripts/mcu_emulator.py --start 30,-20,15,-10,50,5
+
+# Slower motor response (default tau=0.2s):
+python3 scripts/mcu_emulator.py --start 30,-20,15,-10,50,5 --tau 0.5
+```
+
+The emulator prints the virtual serial port path:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  MCU Emulator Ready                                        ║
+║  Connect the bridge with:                                   ║
+║    uart_port:=/dev/pts/7                                   ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+**Terminal 2 — launch the full ROS stack with that port:**
+
+```bash
+# Plan+Execute from RViz only (no vision):
+ros2 launch arm_bringup arm_bringup.launch.py \
+  use_real_robot:=true uart_port:=/dev/pts/7 use_teleop:=false
+
+# With homing on startup:
+ros2 launch arm_bringup arm_bringup.launch.py \
+  use_real_robot:=true uart_port:=/dev/pts/7 use_teleop:=false run_homing:=true
+
+# Full pipeline — vision teleop → MoveIt → emulated arm:
+ros2 launch arm_bringup arm_bringup.launch.py \
+  use_real_robot:=true uart_port:=/dev/pts/7
+# then in a third terminal:
+python arm_vision/main.py run --host localhost --show
+```
+
+**Emulator output legend:**
+
+| Color | Tag | Meaning |
+|-------|-----|---------|
+| Cyan | `[MCU RX TRAJ]` | Command frame received from bridge during a trajectory |
+| Cyan | `[MCU RX HOLD]` | Command frame received during idle-hold |
+| Yellow | `[MCU TX MOVE]` | Encoder feedback sent back — motors still converging |
+| Yellow | `[MCU TX HOLD]` | Encoder feedback sent back — motors at target |
+| Red | `[MCU WATCHDOG]` | No command received within timeout — TX gap detected |
+
+**Emulator options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--start J1,J2,J3,J4,J5,J6` | `0,0,0,0,0,0` | Initial motor positions in degrees |
+| `--rate Hz` | `20` | Feedback send rate (should match `send_rate_hz`) |
+| `--tau s` | `0.2` | Motor time constant — how fast position approaches target |
+| `--watchdog s` | `1.0` | Warn if no command received for this long |
+| `--quiet` | off | Only print changes > 0.5° and warnings |
+
+### 8 — Pipeline test (mock arm\_vision sender)
+
+Sends fake target poses over TCP without a camera, to test the full post-vision pipeline:
+
+```bash
+# Interactive mode — type poses manually:
+python scripts/test_pose_sender.py
+
+# Demo mode — loops through a preset waypoint sequence:
+python scripts/test_pose_sender.py --demo
+
+# Hold a fixed pose:
+python scripts/test_pose_sender.py --hold 0.3 0.0 0.2
 ```
 
 ---
@@ -227,9 +329,10 @@ Edit `arm_vision/config/workspace.yaml` to match your physical setup:
 
 | Argument | Default | Description |
 |---|---|---|
-| `use_real_robot` | `false` | `true` to start the UART bridge to the STM32 |
-| `uart_port` | `/dev/ttyS3` | Serial device for the STM32 connection |
+| `use_real_robot` | `false` | `true` to start the UART bridge to the MCU |
+| `uart_port` | *(required when `use_real_robot:=true`)* | Serial device for the MCU connection, e.g. `/dev/ttyUSB0` |
 | `baud_rate` | `115200` | UART baud rate |
+| `use_teleop` | `true` | `false` to skip socket\_teleop and use MoveIt Plan+Execute directly |
 | `socket_host` | `0.0.0.0` | TCP bind address for the pose socket |
 | `socket_port` | `9999` | TCP bind port for the pose socket |
 | `use_moveit_rviz` | `true` | Show MoveIt2 RViz panel |
@@ -255,9 +358,83 @@ python main.py run               [--device N] [--host IP] [--port 9999]
 
 ---
 
+## UART Protocol & Joint Mapping
+
+### Physical layer
+
+- **Device:** configured via `uart_port:=/dev/yourdevice` at launch time (or set `port` in `hardware_params.yaml`)
+- **Baud rate:** 115200, 8N1
+
+To find the correct device:
+```bash
+ls /dev/ttyUSB* /dev/ttyACM* /dev/ttyCH341* 2>/dev/null
+# plug in the USB-UART cable, then run again and note what appeared
+```
+
+### Frame format
+
+Fixed 16-byte binary frame, same structure in both directions:
+
+```
+Offset  Bytes  Field
+──────  ─────  ──────────────────────────────────────────────
+0       1      SOF = 0xA5  (sync sentinel)
+1       1      LEN = 0x0C  (payload byte count = 12)
+2–13    12     6 × int16_t, little-endian, centidegrees (1/100 °)
+               order: J1 J2 J3 J4 J5 J6
+14–15   2      CRC16-MODBUS (poly 0xA001, init 0xFFFF) over bytes [0..13]
+               little-endian (lo byte first)
+──────  ─────  ──────────────────────────────────────────────
+Total   16 bytes
+```
+
+Values are in **motor degrees** (after sign-flip and gear-ratio).  Resolution is 0.01°, range ±327.67°.  Frames failing SOF, LEN, or CRC checks are dropped with a `[WARN]` log; the bridge re-syncs by scanning for the next `0xA5` byte.
+
+Suggested MCU DMA setup (STM32 HAL):
+```c
+HAL_UART_Receive_DMA(&huart, rx_buf, 16);  // fires once per complete frame
+```
+
+### Joint sign & gear ratio
+
+The MCU reports raw **motor** angles.  `uart_bridge_node` converts to/from URDF **joint** angles using two per-joint parameters in `arm_hardware/config/hardware_params.yaml`:
+
+```
+TX: motor_angle = sign × joint_angle × gear_ratio
+RX: joint_angle = sign × motor_angle ÷ gear_ratio
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `joint_sign_flip` | `[-1, -1, 1, -1, -1, 1]` | `+1` = same direction as URDF, `-1` = flip |
+| `joint_gear_ratio` | `[2, 1, 1, 1, 1, 1]` | Motor turns per joint turn (J1 has 2:1 reduction) |
+
+Order for both lists: `[Joint1, Joint2, Joint3, Joint4, Joint5, Joint6]`.
+
+To tune these values: run view-only mode, move each joint by hand, and adjust until the RViz model matches the physical arm.
+
+### `hardware_params.yaml` key parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `send_rate_hz` | `20.0` | TX rate to MCU (Hz) — keep ≤ 20 Hz to avoid MCU DMA overrun |
+| `command_timeout_s` | `0.5` | Idle-hold refresh interval — re-TX last position to keep MCU watchdog alive |
+| `override_joint_states` | `false` | Set `true` (real robot) to publish MCU encoder feedback as `/joint_states` |
+| `debug_rx` | `false` | Log every raw RX frame and parsed values to the ROS terminal |
+| `debug_tx` | `false` | Log every TX frame with source tag (`TRAJ` or `HOLD`) and frame counter |
+| `servo_hold_after_traj_s` | `2.0` | Block servo topic messages for this long after a trajectory ends |
+
+---
+
 ## Hardware
 
 - **SBC:** OrangePi (RK3588, ARM64)
-- **MCU:** STM32 connected via UART (`/dev/ttyS3`)
+- **MCU:** ESP32/STM32 connected via USB-UART dongle (pass device path as `uart_port:=...`)
 - **Camera:** USB webcam (any OpenCV-compatible device)
 - **Arm:** 6-DOF (Joint1 – Joint6)
+
+> **Serial port access:** add your user to the `dialout` group if the device permission is denied:
+> ```bash
+> sudo usermod -aG dialout $USER   # log out and back in to apply
+> sudo systemctl stop ModemManager  # prevents ModemManager hijacking ttyACM* devices
+> ```

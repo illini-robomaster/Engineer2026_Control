@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """
-homing_node — moves each arm joint to 0 rad in a configurable sequential order.
+homing_node — moves arm joints to 0 rad in configurable parallel groups.
 
-Sends a FollowJointTrajectory action goal for ALL joints per step (required by
-the controller since allow_partial_joints_goal=false), moving only ONE joint
-toward 0 at a time while holding all others at their current positions.  Waits
-for action completion before proceeding to the next joint.
+Within each group all listed joints move simultaneously; groups execute
+sequentially.  This halves wall-clock homing time vs. one-at-a-time.
 
-Default homing order: Joint2 → Joint1 → Joint3 → Joint4 → Joint5 → Joint6
-Rationale: Joint2 (shoulder lift) is zeroed first so the arm tucks in, then
-Joint1 (base rotation) returns to forward, then distal joints fold.
+Default groups:
+  [Joint2, Joint3]  →  [Joint4, Joint5]  →  [Joint6, Joint1]
+Rationale:
+  Group 1 — shoulder lift (J2) and elbow (J3) tuck together; biggest arcs
+             cleared first so later movements have no obstruction.
+  Group 2 — wrist pitch (J4) and roll (J5) neutralise in tandem; safe because
+             J2/J3 are already at zero.
+  Group 3 — gripper spin (J6) and base rotation (J1) finish last; J1 returns
+             to forward only after the arm is already tucked.
 
 Parameters:
-  homing_order       — joint names in desired order (default: [J2,J1,J3,J4,J5,J6])
+  homing_order       — flat joint list defining group membership
+                        (default: [J2,J3,J4,J5,J6,J1])
+  homing_groups      — sizes of consecutive groups in homing_order
+                        (default: [2,2,2] → three pairs)
   joint_speed_rad_s  — max joint speed used to compute step duration (default: 0.3)
-  min_duration_s     — minimum time for any single step (default: 2.0 s)
-  settle_time_s      — extra wait after each step for mechanical settling (default: 0.5 s)
+  min_duration_s     — minimum time for any single group (default: 2.0 s)
+  settle_time_s      — extra wait after each group for mechanical settling (default: 0.5 s)
 
 Usage:
   # Standalone (recommended — run before starting teleop/vision):
@@ -31,6 +38,8 @@ import time
 import rclpy
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
+from moveit_msgs.msg import AllowedCollisionMatrix, PlanningScene, PlanningSceneComponents
+from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -39,8 +48,13 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 # ── Canonical joint order expected by the controller ──────────────────────────
 _ALL_JOINTS = ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6']
 
-# ── Default homing order ───────────────────────────────────────────────────────
-_DEFAULT_ORDER = ['Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6', 'Joint1']
+# ── Default homing groups (joints in each group move simultaneously) ──────────
+_DEFAULT_GROUPS = [
+    ['Joint2'],   # shoulder + elbow tuck in together
+    ['Joint3'],
+    ['Joint4', 'Joint5'],   # wrist pitch + roll neutralise
+    ['Joint6', 'Joint1'],   # gripper spin + base return
+]
 
 # ── Action server (JointTrajectoryController standard naming) ──────────────────
 _ACTION_NAME = '/arm_controller/follow_joint_trajectory'
@@ -51,24 +65,83 @@ class HomingNode(Node):
     def __init__(self) -> None:
         super().__init__('homing_node')
 
-        self.declare_parameter('homing_order', _DEFAULT_ORDER)
+        self.declare_parameter('homing_order', [j for g in _DEFAULT_GROUPS for j in g])
+        self.declare_parameter('homing_groups', [len(g) for g in _DEFAULT_GROUPS])
         self.declare_parameter('joint_speed_rad_s', 0.3)
         self.declare_parameter('min_duration_s', 2.0)
         self.declare_parameter('settle_time_s', 0.5)
 
-        self._order   = list(self.get_parameter('homing_order').value)
+        flat_order  = list(self.get_parameter('homing_order').value)
+        group_sizes = list(self.get_parameter('homing_groups').value)
+        # Reconstruct groups from flat list + group sizes
+        self._groups: list[list[str]] = []
+        idx = 0
+        for size in group_sizes:
+            self._groups.append(flat_order[idx:idx + size])
+            idx += size
+        if idx < len(flat_order):           # remainder → single extra group
+            self._groups.append(flat_order[idx:])
+
         self._speed   = float(self.get_parameter('joint_speed_rad_s').value)
         self._min_dur = float(self.get_parameter('min_duration_s').value)
         self._settle  = float(self.get_parameter('settle_time_s').value)
 
         # Current joint positions (updated from /joint_states)
         self._current: dict[str, float] = {}
+        self._homed: set[str] = set()   # joints already homed → always command 0
+        self._saved_acm = None
 
         self._js_sub = self.create_subscription(
             JointState, '/joint_states', self._js_cb, 10)
 
         self._action_client = ActionClient(
             self, FollowJointTrajectory, _ACTION_NAME)
+
+        self._get_scene_cli   = self.create_client(GetPlanningScene,   '/get_planning_scene')
+        self._apply_scene_cli = self.create_client(ApplyPlanningScene, '/apply_planning_scene')
+
+    # ── Collision ACM helpers ─────────────────────────────────────────────────
+
+    def _disable_collisions(self) -> None:
+        """Save the current planning-scene ACM and replace it with an all-allow matrix."""
+        if not self._get_scene_cli.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('GetPlanningScene unavailable — skipping ACM save.')
+            return
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        fut = self._get_scene_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
+        if fut.result():
+            self._saved_acm = fut.result().scene.allowed_collision_matrix
+            self.get_logger().info(
+                f'[ACM] Saved ({len(self._saved_acm.entry_names)} explicit entries). '
+                'Disabling collision checking for pre-homing phase.')
+
+        all_links = ['base_link', 'Link0', 'Link1', 'J3_J4', 'Link2', 'J5_J6', 'End_Effector']
+        acm = AllowedCollisionMatrix()
+        acm.default_entry_names  = all_links
+        acm.default_entry_values = [True] * len(all_links)
+        scene = PlanningScene(is_diff=True)
+        scene.allowed_collision_matrix = acm
+
+        if not self._apply_scene_cli.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('ApplyPlanningScene unavailable — collision checking stays on.')
+            return
+        apply_fut = self._apply_scene_cli.call_async(ApplyPlanningScene.Request(scene=scene))
+        rclpy.spin_until_future_complete(self, apply_fut, timeout_sec=5.0)
+        self.get_logger().info('[ACM] All-allow matrix applied.')
+
+    def _restore_collisions(self) -> None:
+        """Restore the ACM saved by _disable_collisions."""
+        if self._saved_acm is None:
+            self.get_logger().warn('[ACM] No saved ACM — cannot restore collision checking.')
+            return
+        scene = PlanningScene(is_diff=True)
+        scene.allowed_collision_matrix = self._saved_acm
+        apply_fut = self._apply_scene_cli.call_async(ApplyPlanningScene.Request(scene=scene))
+        rclpy.spin_until_future_complete(self, apply_fut, timeout_sec=5.0)
+        self.get_logger().info('[ACM] Collision checking restored.')
+        self._saved_acm = None
 
     # ── Joint state callback ───────────────────────────────────────────────────
 
@@ -96,38 +169,46 @@ class HomingNode(Node):
         """Compute step duration from angle distance and speed limit."""
         return max(abs(delta_rad) / self._speed, self._min_dur)
 
-    # ── Single-joint homing step ───────────────────────────────────────────────
+    # ── Group homing step ──────────────────────────────────────────────────────
 
-    def _home_one(self, joint_name: str) -> bool:
-        """Move `joint_name` to 0, hold all others. Returns True on success."""
+    def _home_group(self, joint_names: list[str]) -> bool:
+        """Move all joints in `joint_names` to 0 simultaneously, hold all others.
+        Returns True on success."""
         current_pos = {j: self._current.get(j, 0.0) for j in _ALL_JOINTS}
-        delta = current_pos[joint_name]            # distance to zero
 
-        if abs(delta) < 0.005:                     # ~0.3° — already at zero
+        # Filter out joints that are already at zero
+        to_move = [j for j in joint_names if abs(current_pos[j]) >= 0.005]
+        if not to_move:
             self.get_logger().info(
-                f'  {joint_name} already at zero ({math.degrees(delta):+.2f}°), skip.')
+                f'  {" + ".join(joint_names)} already at zero, skip.')
             return True
 
-        duration_s = self._duration_for(delta)
-        self.get_logger().info(
-            f'  Homing {joint_name}: '
-            f'{math.degrees(delta):+.1f}° → 0°  '
-            f'(duration={duration_s:.1f} s)')
+        # Duration driven by the joint that has the farthest to travel
+        duration_s = max(self._duration_for(current_pos[j]) for j in to_move)
 
-        # Build goal — all joints, only this one moves to 0
+        label = ' + '.join(joint_names)
+        self.get_logger().info(
+            f'  Homing [{label}]  duration={duration_s:.1f}s  ' +
+            '  '.join(f'{j}: {math.degrees(current_pos[j]):+.1f}°→0°' for j in to_move))
+
         target_pos = dict(current_pos)
-        target_pos[joint_name] = 0.0
+        # Zero the joints in this group AND all previously-homed joints.
+        # Without this, encoder lag from earlier groups (motor hasn't fully
+        # converged to 0) would be re-commanded as the hold position,
+        # effectively undoing earlier homing.
+        for j in to_move:
+            target_pos[j] = 0.0
+        for j in self._homed:
+            target_pos[j] = 0.0
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(_ALL_JOINTS)
 
-        # Point 0: current position, zero velocity, t=0
         p0 = JointTrajectoryPoint()
         p0.positions  = [current_pos[j] for j in _ALL_JOINTS]
         p0.velocities = [0.0] * 6
         p0.time_from_start = Duration(sec=0, nanosec=0)
 
-        # Point 1: goal position, zero velocity, t=duration
         p1 = JointTrajectoryPoint()
         p1.positions  = [target_pos[j] for j in _ALL_JOINTS]
         p1.velocities = [0.0] * 6
@@ -137,72 +218,74 @@ class HomingNode(Node):
 
         goal.trajectory.points = [p0, p1]
 
-        # Send goal and wait for acceptance
         future = self._action_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future)
         goal_handle = future.result()
 
         if not goal_handle.accepted:
             self.get_logger().error(
-                f'Goal rejected for {joint_name}! '
+                f'Goal rejected for [{label}]! '
                 'Is arm_controller active and not preempted?')
             return False
 
-        # Wait for execution to finish
         result_future = goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, result_future)
         result = result_future.result().result
         if result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
             self.get_logger().warn(
-                f'  {joint_name}: action finished with error_code={result.error_code} '
-                f'({result.error_string})')
+                f'  [{label}]: error_code={result.error_code} ({result.error_string})')
 
-        # Settle: let the hardware physically stop vibrating
         time.sleep(self._settle)
 
-        # Refresh current positions
         for _ in range(5):
             rclpy.spin_once(self, timeout_sec=0.05)
 
+        # Mark these joints as homed so subsequent groups keep them at zero.
+        self._homed.update(to_move)
+
         self.get_logger().info(
-            f'  {joint_name} → done  '
-            f'(now {math.degrees(self._current.get(joint_name, 0.0)):+.1f}°)')
+            '  done  ' + '  '.join(
+                f'{j}={math.degrees(self._current.get(j, 0.0)):+.1f}°'
+                for j in joint_names))
         return True
 
     # ── Main sequence ──────────────────────────────────────────────────────────
 
     def run(self) -> None:
+        group_strs = [' + '.join(g) for g in self._groups]
         self.get_logger().info('=' * 50)
         self.get_logger().info('Homing sequence starting')
-        self.get_logger().info(f'Order: {" → ".join(self._order)}')
+        self.get_logger().info('Groups: ' + '  →  '.join(f'[{s}]' for s in group_strs))
         self.get_logger().info('=' * 50)
 
-        # Wait for joint state feedback
-        self._wait_for_joint_states()
+        self._disable_collisions()
+        try:
+            self._wait_for_joint_states()
 
-        # Wait for action server
-        self.get_logger().info(f'Waiting for {_ACTION_NAME}…')
-        if not self._action_client.wait_for_server(timeout_sec=15.0):
-            self.get_logger().error(
-                f'Action server {_ACTION_NAME} not available. '
-                'Is arm_controller running and active?')
-            return
-
-        # Sequential homing
-        for joint in self._order:
-            if joint not in _ALL_JOINTS:
-                self.get_logger().warn(
-                    f'Unknown joint "{joint}" in homing_order, skipping.')
-                continue
-            ok = self._home_one(joint)
-            if not ok:
+            self.get_logger().info(f'Waiting for {_ACTION_NAME}…')
+            if not self._action_client.wait_for_server(timeout_sec=15.0):
                 self.get_logger().error(
-                    f'Homing aborted at {joint}.')
+                    f'Action server {_ACTION_NAME} not available. '
+                    'Is arm_controller running and active?')
                 return
 
-        self.get_logger().info('=' * 50)
-        self.get_logger().info('Homing complete — all joints at 0 rad')
-        self.get_logger().info('=' * 50)
+            for group in self._groups:
+                valid = [j for j in group if j in _ALL_JOINTS]
+                unknown = [j for j in group if j not in _ALL_JOINTS]
+                for j in unknown:
+                    self.get_logger().warn(f'Unknown joint "{j}" in homing group, skipping.')
+                if not valid:
+                    continue
+                ok = self._home_group(valid)
+                if not ok:
+                    self.get_logger().error(f'Homing aborted at group [{" + ".join(valid)}].')
+                    return
+
+            self.get_logger().info('=' * 50)
+            self.get_logger().info('Homing complete — all joints at 0 rad')
+            self.get_logger().info('=' * 50)
+        finally:
+            self._restore_collisions()
 
 
 def main() -> None:

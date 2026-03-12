@@ -17,7 +17,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-UART_PORT="/dev/ttyS3"
+UART_PORT=""
 DEBUG_RX="false"
 USE_CRC="true"
 
@@ -30,6 +30,16 @@ while [[ $# -gt 0 ]]; do
         *)       UART_PORT="$1";  shift ;;   # positional fallback
     esac
 done
+
+if [[ -z "$UART_PORT" ]]; then
+    echo "ERROR: serial port not specified."
+    echo "Usage: $0 --port /dev/yourdevice"
+    echo "Example: $0 --port /dev/ttyUSB0"
+    echo ""
+    echo "Available ports:"
+    ls /dev/ttyUSB* /dev/ttyACM* /dev/ttyCH341* /dev/ttyS* 2>/dev/null | head -20 || echo "  (none found)"
+    exit 1
+fi
 
 export PATH="$HOME/.local/bin:$PATH"
 set +u

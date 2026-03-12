@@ -21,23 +21,26 @@ Top-level bringup: starts the complete teleoperation system.
 
 Launch arguments:
   use_real_robot   : true → start UART bridge; false → sim only (default: false)
-  uart_port        : UART device path                         (default: /dev/ttyS3)
+  uart_port        : UART device path                         (default: /dev/ttyCH341USB0)
   baud_rate        : UART baud rate                           (default: 115200)
+  use_teleop       : start socket_teleop_node (arm_vision pipeline) (default: true)
+                     set false to use MoveIt Plan+Execute from RViz directly
   socket_host      : TCP bind address for pose socket         (default: 0.0.0.0)
   socket_port      : TCP bind port for pose socket            (default: 9999)
   use_moveit_rviz  : show MoveIt RViz panel                   (default: true)
   print_joints     : print live joint angles to terminal      (default: false)
-                     shows [CURRENT] at every /joint_states tick and
-                     [PLAN GOAL] whenever a MoveIt plan is published
-  run_homing       : run sequential homing (→ 0 rad) on startup (default: false)
+  run_homing       : run parallel-group homing on startup (default: false)
                      only effective when use_real_robot:=true
-                     order: Joint2 → Joint1 → Joint3 → Joint4 → Joint5 → Joint6
+                     groups: [Joint2+Joint3] → [Joint4+Joint5] → [Joint6+Joint1]
 
-Quick-start (simulation only):
-  ros2 launch arm_bringup arm_bringup.launch.py
+Quick-start (simulation only, Plan+Execute via RViz):
+  ros2 launch arm_bringup arm_bringup.launch.py use_teleop:=false
 
-With real robot:
-  ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true uart_port:=/dev/ttyS3
+With real robot, Plan+Execute only (no arm_vision):
+  ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true use_teleop:=false
+
+With real robot + arm_vision socket teleop:
+  ros2 launch arm_bringup arm_bringup.launch.py use_real_robot:=true
 
 Print joint angles while using MoveIt (run in a SEPARATE terminal — cleaner output):
   source install/setup.bash && ros2 run arm_teleop joint_monitor_node
@@ -73,11 +76,14 @@ def generate_launch_description():
     use_real_robot  = LaunchConfiguration('use_real_robot')
     uart_port       = LaunchConfiguration('uart_port')
     baud_rate       = LaunchConfiguration('baud_rate')
+    use_teleop      = LaunchConfiguration('use_teleop')
     socket_host     = LaunchConfiguration('socket_host')
     socket_port     = LaunchConfiguration('socket_port')
     use_moveit_rviz = LaunchConfiguration('use_moveit_rviz')
     print_joints    = LaunchConfiguration('print_joints')
     run_homing      = LaunchConfiguration('run_homing')
+    debug_tx        = LaunchConfiguration('debug_tx')
+    debug_rx        = LaunchConfiguration('debug_rx')
 
     # ── MoveIt2 + ros2_control + servo_node + RViz ───────────────────────────
     moveit_launch = IncludeLaunchDescription(
@@ -95,6 +101,7 @@ def generate_launch_description():
             'host': socket_host,
             'port': socket_port,
         }.items(),
+        condition=IfCondition(use_teleop),
     )
 
     # ── Joint monitor (optional — prints live joint angles and planned goal) ────
@@ -113,19 +120,24 @@ def generate_launch_description():
             'uart_port':  uart_port,
             'baud_rate':  baud_rate,
             'run_homing': run_homing,
+            'debug_tx':   debug_tx,
+            'debug_rx':   debug_rx,
         }.items(),
         condition=IfCondition(use_real_robot),
     )
 
     return LaunchDescription([
         DeclareLaunchArgument('use_real_robot',  default_value='false'),
-        DeclareLaunchArgument('uart_port',       default_value='/dev/ttyCH341USB0'),
+        DeclareLaunchArgument('uart_port',       default_value=''),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
+        DeclareLaunchArgument('use_teleop',      default_value='true'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),
         DeclareLaunchArgument('print_joints',    default_value='false'),
         DeclareLaunchArgument('run_homing',      default_value='false'),
+        DeclareLaunchArgument('debug_tx',        default_value='false'),
+        DeclareLaunchArgument('debug_rx',        default_value='false'),
 
         moveit_launch,
         teleop_launch,

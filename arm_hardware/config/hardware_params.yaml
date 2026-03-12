@@ -1,11 +1,11 @@
 uart_bridge_node:
   ros__parameters:
     # ── UART port ──────────────────────────────────────────────────────────────
-    # Set this to the correct Orange Pi UART device connected to the MCU.
-    # Common values: /dev/ttyCH341USB0 (USB-UART dongle), /dev/ttyS3 (built-in),
-    #                /dev/ttyAMA0, /dev/ttyUSB0
-    # To find it: ls /dev/tty* before and after plugging in the USB-UART cable.
-    port: "/dev/ttyCH341USB0"
+    # Set this to the correct serial device for your MCU connection.
+    # Common values: /dev/ttyUSB0, /dev/ttyCH341USB0, /dev/ttyACM0, /dev/ttyS3
+    # Find it with: ls /dev/tty* before and after plugging in the USB-UART cable.
+    # You can also override at launch time:  uart_port:=/dev/yourdevice
+    port: ""   # TODO: set your device here, or pass uart_port:=... on the command line
     baud_rate: 115200
     serial_timeout: 0.05    # seconds, read timeout per call
 
@@ -19,24 +19,55 @@ uart_bridge_node:
       - Joint5
       - Joint6
 
-    # ── Wire protocol ─────────────────────────────────────────────────────────
-    # use_crc_framing: true  (default, recommended)
-    #   TX: "$d1.ddd,...,d6.ddd*CCCC\n"   (CRC16-MODBUS, 4-char hex suffix)
-    #   RX: same framed format; frames failing CRC are dropped with a WARN log.
+    # ── Joint sign convention ─────────────────────────────────────────────────
+    # Per-joint sign multiplier: +1.0 = same rotation direction as URDF,
+    #                            -1.0 = flip (MCU positive is URDF negative).
+    # Applied symmetrically on TX (ROS→MCU) and RX (MCU→ROS) so MoveIt
+    # visualization always matches hardware motion.
+    # Order: [Joint1, Joint2, Joint3, Joint4, Joint5, Joint6]
+    joint_sign_flip: [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0]
+
+    # Per-joint gear ratio (motor turns / joint turn).
+    # TX: motor_angle = joint_angle * ratio  (what we send to the MCU)
+    # RX: joint_angle = motor_angle / ratio  (what we publish to ROS)
+    # J1 has a 2:1 reduction — motor rotates 2° per 1° of arm rotation.
+    # All other joints are direct (1.0).
+    # Order: [Joint1, Joint2, Joint3, Joint4, Joint5, Joint6]
+    joint_gear_ratio: [2.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    # ── Wire protocol — BINARY, 16 bytes fixed, both directions ─────────────
     #
-    # use_crc_framing: false  (legacy / MCU firmware not yet updated)
-    #   TX: "d1.ddd,...,d6.ddd\n"         (plain CSV, no header or checksum)
-    #   RX: same plain CSV format.
-    #   Use this temporarily while updating MCU firmware to the framed protocol.
-    use_crc_framing: true     # MCU sends $payload*CCCC\n  — CRC16-MODBUS framing
+    #  Offset  Bytes  Field
+    #  0       1      SOF = 0xA5
+    #  1       1      LEN = 0x0C  (payload byte count = 12)
+    #  2–13    12     6 × int16_t, little-endian, centidegrees (1/100 °)
+    #                 order: J1 J2 J3 J4 J5 J6
+    #  14–15   2      CRC16-MODBUS (poly 0xA001, init 0xFFFF) over bytes [0..13]
+    #                 little-endian (lo byte first)
+    #
+    #  int16 range: ±32767 centideg = ±327.67°  resolution: 0.01°
+    #
+    #  MCU DMA setup (fixed-size, simplest option):
+    #    HAL_UART_Receive_DMA(&huart, rx_buf, 16);
+    #  DMA complete fires exactly once per frame — no idle-line, no CRLF needed.
+    #
+    #  Resync after corruption:
+    #    Read 1 byte at a time until buf[0]==0xA5, then read 15 more bytes.
+    #    Validate buf[1]==0x0C and CRC before unpacking.
+    #
+    #  Pi TX debug log shows:  hex bytes  and  decoded angles in degrees.
 
     # debug_rx: print every raw line and parsed result to the ROS log.
     # Useful for verifying the MCU is sending correctly.  Disable in production.
     debug_rx: false
 
     # Rate at which commands are sent to the STM32 (Hz).
-    # Should be <= the rate at which MoveIt Servo publishes trajectories (~30 Hz).
-    send_rate_hz: 50.0
+    # Keep this at or below ~20 Hz. At 50 Hz on a non-RT OS, ROS2 timer callbacks
+    # can fire in bursts, sending frames back-to-back with no gap.  A typical STM32
+    # DMA receive buffer (~64-256 bytes ≈ 4 frames at 51 bytes/frame) overflows,
+    # producing corrupted frames with garbage bytes mid-payload.
+    # 20 Hz gives 50 ms between frames — plenty of drain time for the MCU.
+    send_rate_hz: 20.0
 
     # Stale-command timeout: stop sending if no new trajectory received in this time.
     command_timeout_s: 0.5

@@ -42,6 +42,13 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(use_real_robot),
     )
 
+    # ── Simulation only: spawn joint_state_broadcaster + arm_controller ──────
+    # In real-robot mode uart_bridge_node owns /joint_states (encoder
+    # feedback) and /arm_controller/follow_joint_trajectory (action server).
+    # Spawning the broadcaster here would create a second /joint_states
+    # publisher — even with the remap on control_node_real, some
+    # ros2_control versions publish from the controller's own node handle,
+    # bypassing the remap.  Skipping both controllers avoids the conflict.
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
@@ -53,6 +60,7 @@ def generate_launch_description() -> LaunchDescription:
             "120",
         ],
         output="screen",
+        condition=UnlessCondition(use_real_robot),
     )
 
     arm_controller_spawner = Node(
@@ -66,6 +74,7 @@ def generate_launch_description() -> LaunchDescription:
             "120",
         ],
         output="screen",
+        condition=UnlessCondition(use_real_robot),
     )
 
     return LaunchDescription(

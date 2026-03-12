@@ -46,12 +46,14 @@ def generate_launch_description() -> LaunchDescription:
     uart_port    = LaunchConfiguration('uart_port')
     baud_rate    = LaunchConfiguration('baud_rate')
     debug_rx     = LaunchConfiguration('debug_rx')
+    debug_tx     = LaunchConfiguration('debug_tx')
     use_crc      = LaunchConfiguration('use_crc_framing')
 
     return LaunchDescription([
-        DeclareLaunchArgument('uart_port',      default_value='/dev/ttyS3'),
+        DeclareLaunchArgument('uart_port',      default_value=''),
         DeclareLaunchArgument('baud_rate',      default_value='115200'),
         DeclareLaunchArgument('debug_rx',       default_value='false'),
+        DeclareLaunchArgument('debug_tx',       default_value='false'),
         DeclareLaunchArgument('use_crc_framing', default_value='true'),   # MCU uses $...*CCCC
 
         # TF broadcaster: /joint_states → /tf
@@ -76,6 +78,7 @@ def generate_launch_description() -> LaunchDescription:
                     'baud_rate':             baud_rate,
                     'override_joint_states': True,   # own /joint_states
                     'debug_rx':              debug_rx,
+                    'debug_tx':              debug_tx,
                     'use_crc_framing':       use_crc,
                 },
             ],

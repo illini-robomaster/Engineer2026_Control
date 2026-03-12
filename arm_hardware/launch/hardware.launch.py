@@ -25,6 +25,8 @@ def generate_launch_description():
     uart_port  = LaunchConfiguration('uart_port')
     baud_rate  = LaunchConfiguration('baud_rate')
     run_homing = LaunchConfiguration('run_homing')
+    debug_tx   = LaunchConfiguration('debug_tx')
+    debug_rx   = LaunchConfiguration('debug_rx')
 
     uart_bridge = Node(
         package='arm_hardware',
@@ -42,6 +44,8 @@ def generate_launch_description():
                 # /mock_joint_states (handled in control.launch.py when
                 # use_real_robot=true).
                 'override_joint_states':   True,
+                'debug_rx':                debug_rx,
+                'debug_tx':                debug_tx,
             },
         ],
     )
@@ -62,9 +66,11 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('uart_port',  default_value='/dev/ttyCH341USB0'),
+        DeclareLaunchArgument('uart_port',  default_value=''),
         DeclareLaunchArgument('baud_rate',  default_value='115200'),
         DeclareLaunchArgument('run_homing', default_value='false'),
+        DeclareLaunchArgument('debug_rx',   default_value='false'),
+        DeclareLaunchArgument('debug_tx',   default_value='false'),
         uart_bridge,
         homing_node,
     ])
