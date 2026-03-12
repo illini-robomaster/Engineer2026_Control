@@ -77,9 +77,13 @@ def cmd_run(args: argparse.Namespace):
     if not cap.isOpened():
         sys.exit(f'[ERROR] Cannot open camera device {args.device}')
 
-    print(f'Connecting to ROS node at {args.host}:{args.port}…')
-    client = PoseSocketClient(host=args.host, port=args.port)
-    client.start()
+    if args.no_socket:
+        print('Socket disabled — running in local visualization mode.')
+        client = None
+    else:
+        print(f'Connecting to ROS node at {args.host}:{args.port}…')
+        client = PoseSocketClient(host=args.host, port=args.port)
+        client.start()
 
     print('Running — press Q or ESC in the preview window to stop.')
     print()
@@ -99,11 +103,12 @@ def cmd_run(args: argparse.Namespace):
 
             if cube_pos is not None:
                 ee_pos, ee_quat = mapper.map(cube_pos, cube_quat)
-                client.send_pose(
-                    x=float(ee_pos[0]),  y=float(ee_pos[1]),  z=float(ee_pos[2]),
-                    qx=float(ee_quat[0]), qy=float(ee_quat[1]),
-                    qz=float(ee_quat[2]), qw=float(ee_quat[3]),
-                )
+                if client is not None:
+                    client.send_pose(
+                        x=float(ee_pos[0]),  y=float(ee_pos[1]),  z=float(ee_pos[2]),
+                        qx=float(ee_quat[0]), qy=float(ee_quat[1]),
+                        qz=float(ee_quat[2]), qw=float(ee_quat[3]),
+                    )
                 send_count += 1
 
             frame_count += 1
@@ -171,7 +176,8 @@ def cmd_run(args: argparse.Namespace):
     finally:
         cap.release()
         cv2.destroyAllWindows()
-        client.stop()
+        if client is not None:
+            client.stop()
         print(f'\nStopped.  Sent {send_count} pose messages.')
 
 
@@ -225,6 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
                     dest='workspace_config')
     rn.add_argument('--show',             action='store_true',
                     help='Display live preview window')
+    rn.add_argument('--no-socket',        action='store_true', dest='no_socket',
+                    help='Skip socket connection (local visualization only)')
 
     return p
 
