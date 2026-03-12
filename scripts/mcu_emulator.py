@@ -29,6 +29,7 @@ import os
 import select
 import struct
 import sys
+import tty
 import time
 
 # ── Frame constants (must match uart_bridge_node.py) ──────────────────────
@@ -80,6 +81,10 @@ def fmt_joints(vals: list[float]) -> str:
     return '  '.join(f'{l}={v:+8.2f}°' for l, v in zip(labels, vals))
 
 
+def set_raw_mode(fd: int) -> None:
+    tty.setraw(fd)
+
+
 def main():
     parser = argparse.ArgumentParser(description='STM32 MCU emulator for UART bridge testing')
     parser.add_argument('--start', type=str, default='0,0,0,0,0,0',
@@ -88,6 +93,8 @@ def main():
                         help='Feedback send rate in Hz (default: 20)')
     parser.add_argument('--tau', type=float, default=0.2,
                         help='Motor time constant in seconds — how fast position approaches target (default: 0.2)')
+    parser.add_argument('--startup-wait', type=float, default=2.0,
+                        help='Grace period to wait for the first valid command frame before warning (default: 2.0)')
     parser.add_argument('--watchdog', type=float, default=1.0,
                         help='Watchdog timeout in seconds (default: 1.0)')
     parser.add_argument('--quiet', action='store_true',
@@ -101,6 +108,8 @@ def main():
 
     # Create virtual serial port pair via pty
     master_fd, slave_fd = os.openpty()
+    set_raw_mode(master_fd)
+    set_raw_mode(slave_fd)
     slave_path = os.ttyname(slave_fd)
 
     print(f'{C_INFO}╔══════════════════════════════════════════════════════════════╗{C_RESET}')
@@ -110,6 +119,7 @@ def main():
     print(f'{C_INFO}║    uart_port:={slave_path:<40s}║{C_RESET}')
     print(f'{C_INFO}║                                                             ║{C_RESET}')
     print(f'{C_INFO}║  Rate: {args.rate:5.1f} Hz   Tau: {args.tau:.2f}s   Watchdog: {args.watchdog:.1f}s           ║{C_RESET}')
+    print(f'{C_INFO}║  Waiting up to {args.startup_wait:4.1f}s for first valid command frame          ║{C_RESET}')
     print(f'{C_INFO}╚══════════════════════════════════════════════════════════════╝{C_RESET}')
     print()
 
@@ -119,6 +129,8 @@ def main():
     watchdog_warned = False
     tick = 1.0 / args.rate
     alpha = 1.0 - math.exp(-tick / args.tau)  # first-order smoothing coefficient
+    start_t = time.monotonic()
+    startup_warned = False
 
     rx_buf = bytearray()
     frame_count_rx = 0  # commands received from bridge
@@ -173,6 +185,10 @@ def main():
                 last_rx_t = time.monotonic()
                 watchdog_warned = False
 
+                if frame_count_rx == 1 and not args.quiet:
+                    wait_s = last_rx_t - start_t
+                    print(f'{C_INFO}[MCU] First valid command frame after {wait_s:.2f}s{C_RESET}')
+
                 # Print if target changed
                 changed = any(abs(a - b) > 0.05 for a, b in zip(old_target, target_pos))
                 if changed or not args.quiet:
@@ -180,7 +196,12 @@ def main():
 
             # ── Watchdog check ────────────────────────────────────────────
             now = time.monotonic()
-            if last_rx_t > 0 and (now - last_rx_t) > args.watchdog and not watchdog_warned:
+            if last_rx_t == 0.0:
+                if not startup_warned and (now - start_t) > args.startup_wait:
+                    print(f'{C_WARN}[MCU] No valid command frame received after {args.startup_wait:.1f}s; '
+                          f'continuing to wait while sending feedback.{C_RESET}')
+                    startup_warned = True
+            elif (now - last_rx_t) > args.watchdog and not watchdog_warned:
                 gap = now - last_rx_t
                 print(f'{C_WARN}[MCU WATCHDOG] No command for {gap:.2f}s '
                       f'(timeout={args.watchdog:.1f}s) — SIGNAL LOSS!{C_RESET}')

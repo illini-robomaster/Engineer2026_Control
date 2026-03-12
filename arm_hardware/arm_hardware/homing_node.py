@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-homing_node — moves arm joints to 0 rad in configurable parallel groups.
+homing_node — moves arm joints to 0 rad in a safe, collision-aware order.
+
+Homing groups are chosen dynamically based on Joint2's current angle:
+
+  J2 ≥ 0 (arm leaning forward):
+    [J2]  →  [J3, J4, J5, J6]  →  [J1]
+    Retract shoulder first to clear space, then tuck remaining distal
+    joints, finally rotate base home.
+
+  J2 < 0 (arm leaning back):
+    [J3]  →  [J2]  →  [J4, J5, J6]  →  [J1]
+    Fold elbow first (avoids collision with body when shoulder is back),
+    then retract shoulder, then wrist + base.
 
 Within each group all listed joints move simultaneously; groups execute
-sequentially.  This halves wall-clock homing time vs. one-at-a-time.
-
-Default groups:
-  [Joint2, Joint3]  →  [Joint4, Joint5]  →  [Joint6, Joint1]
-Rationale:
-  Group 1 — shoulder lift (J2) and elbow (J3) tuck together; biggest arcs
-             cleared first so later movements have no obstruction.
-  Group 2 — wrist pitch (J4) and roll (J5) neutralise in tandem; safe because
-             J2/J3 are already at zero.
-  Group 3 — gripper spin (J6) and base rotation (J1) finish last; J1 returns
-             to forward only after the arm is already tucked.
+sequentially.
 
 Parameters:
-  homing_order       — flat joint list defining group membership
-                        (default: [J2,J3,J4,J5,J6,J1])
-  homing_groups      — sizes of consecutive groups in homing_order
-                        (default: [2,2,2] → three pairs)
   joint_speed_rad_s  — max joint speed used to compute step duration (default: 0.3)
   min_duration_s     — minimum time for any single group (default: 2.0 s)
   settle_time_s      — extra wait after each group for mechanical settling (default: 0.5 s)
@@ -48,12 +46,17 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 # ── Canonical joint order expected by the controller ──────────────────────────
 _ALL_JOINTS = ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6']
 
-# ── Default homing groups (joints in each group move simultaneously) ──────────
-_DEFAULT_GROUPS = [
-    ['Joint2'],   # shoulder + elbow tuck in together
-    ['Joint3'],
-    ['Joint4', 'Joint5'],   # wrist pitch + roll neutralise
-    ['Joint6', 'Joint1'],   # gripper spin + base return
+# ── Homing group sequences (chosen at runtime based on J2 angle) ─────────────
+_GROUPS_J2_NEG = [
+    ['Joint2'],                              # retract shoulder first
+    ['Joint3', 'Joint4', 'Joint5', 'Joint6'],  # tuck distal joints
+    ['Joint1'],                              # base rotation last
+]
+_GROUPS_J2_POS = [
+    ['Joint3'],                              # fold elbow first (avoid body)
+    ['Joint2'],                              # then retract shoulder
+    ['Joint4', 'Joint5', 'Joint6'],          # wrist joints
+    ['Joint1'],                              # base rotation last
 ]
 
 # ── Action server (JointTrajectoryController standard naming) ──────────────────
@@ -65,22 +68,9 @@ class HomingNode(Node):
     def __init__(self) -> None:
         super().__init__('homing_node')
 
-        self.declare_parameter('homing_order', [j for g in _DEFAULT_GROUPS for j in g])
-        self.declare_parameter('homing_groups', [len(g) for g in _DEFAULT_GROUPS])
         self.declare_parameter('joint_speed_rad_s', 0.3)
         self.declare_parameter('min_duration_s', 2.0)
         self.declare_parameter('settle_time_s', 0.5)
-
-        flat_order  = list(self.get_parameter('homing_order').value)
-        group_sizes = list(self.get_parameter('homing_groups').value)
-        # Reconstruct groups from flat list + group sizes
-        self._groups: list[list[str]] = []
-        idx = 0
-        for size in group_sizes:
-            self._groups.append(flat_order[idx:idx + size])
-            idx += size
-        if idx < len(flat_order):           # remainder → single extra group
-            self._groups.append(flat_order[idx:])
 
         self._speed   = float(self.get_parameter('joint_speed_rad_s').value)
         self._min_dur = float(self.get_parameter('min_duration_s').value)
@@ -252,15 +242,29 @@ class HomingNode(Node):
     # ── Main sequence ──────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        group_strs = [' + '.join(g) for g in self._groups]
         self.get_logger().info('=' * 50)
         self.get_logger().info('Homing sequence starting')
-        self.get_logger().info('Groups: ' + '  →  '.join(f'[{s}]' for s in group_strs))
         self.get_logger().info('=' * 50)
 
         self._disable_collisions()
         try:
             self._wait_for_joint_states()
+
+            # Choose group sequence based on J2 angle.
+            j2_rad = self._current.get('Joint2', 0.0)
+            j2_deg = math.degrees(j2_rad)
+            if j2_rad >= 0.0:
+                groups = _GROUPS_J2_POS
+                self.get_logger().info(
+                    f'J2 = {j2_deg:+.1f}° (≥ 0) → retract shoulder first')
+            else:
+                groups = _GROUPS_J2_NEG
+                self.get_logger().info(
+                    f'J2 = {j2_deg:+.1f}° (< 0) → fold elbow first')
+
+            group_strs = [' + '.join(g) for g in groups]
+            self.get_logger().info(
+                'Groups: ' + '  →  '.join(f'[{s}]' for s in group_strs))
 
             self.get_logger().info(f'Waiting for {_ACTION_NAME}…')
             if not self._action_client.wait_for_server(timeout_sec=15.0):
@@ -269,16 +273,11 @@ class HomingNode(Node):
                     'Is arm_controller running and active?')
                 return
 
-            for group in self._groups:
-                valid = [j for j in group if j in _ALL_JOINTS]
-                unknown = [j for j in group if j not in _ALL_JOINTS]
-                for j in unknown:
-                    self.get_logger().warn(f'Unknown joint "{j}" in homing group, skipping.')
-                if not valid:
-                    continue
-                ok = self._home_group(valid)
+            for group in groups:
+                ok = self._home_group(group)
                 if not ok:
-                    self.get_logger().error(f'Homing aborted at group [{" + ".join(valid)}].')
+                    self.get_logger().error(
+                        f'Homing aborted at group [{" + ".join(group)}].')
                     return
 
             self.get_logger().info('=' * 50)

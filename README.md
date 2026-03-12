@@ -122,7 +122,12 @@ target EE position, and streams it to the ROS `socket_teleop_node` at 30 Hz.
 
 ### 3 — Homing (real robot only)
 
-Homing moves each joint to 0 rad in a safe sequential order so the arm starts from a known configuration.  The default order is **Joint2 → Joint1 → Joint3 → Joint4 → Joint5 → Joint6** (shoulder tucks in first, then base rotation returns, then distal joints fold).
+Homing moves each joint to 0 rad in a collision-aware order.  The group sequence is chosen **dynamically** based on Joint2's current angle at startup:
+
+| J2 angle | Sequence | Rationale |
+|----------|----------|-----------|
+| J2 ≥ 0° (forward) | `[J2] → [J3,J4,J5,J6] → [J1]` | Retract shoulder first to clear space |
+| J2 < 0° (back) | `[J3] → [J2] → [J4,J5,J6] → [J1]` | Fold elbow first to avoid body collision |
 
 Run automatically at startup by adding `run_homing:=true` to the bringup:
 
@@ -141,7 +146,6 @@ Key parameters (override with `--ros-args -p name:=value`):
 
 | Parameter | Default | Description |
 |---|---|---|
-| `homing_order` | `[Joint2,Joint1,Joint3,Joint4,Joint5,Joint6]` | Joints to zero, in order |
 | `joint_speed_rad_s` | `0.3` | Max speed used to compute each step duration |
 | `min_duration_s` | `2.0` | Minimum time allocated per joint step |
 | `settle_time_s` | `0.5` | Extra settle wait after each step |

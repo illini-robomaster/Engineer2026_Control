@@ -81,7 +81,7 @@
   </link>
   <joint
     name="Joint1"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="0 0 0"
       rpy="1.5707963267949 0 0" />
@@ -92,10 +92,10 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-3.14159"
+      upper="3.14159"
       effort="6"
-      velocity="60" />
+      velocity="1.2" />
   </joint>
   <link
     name="Link1">
@@ -137,7 +137,7 @@
   </link>
   <joint
     name="Joint2"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="0 0.0729999999999994 0"
       rpy="0 0 -0.705" />
@@ -148,10 +148,10 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-1.5708"
+      upper="1.5708"
       effort="40"
-      velocity="70" />
+      velocity="1.2" />
   </joint>
   <link
     name="J3_J4">
@@ -193,7 +193,7 @@
   </link>
   <joint
     name="Joint3"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="-0.20761 0.24351 0"
       rpy="-0.86 -1.5708 0" />
@@ -204,10 +204,10 @@
     <axis
       xyz="1 0 0" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-1.20"
+      upper="4.0"
       effort="40"
-      velocity="70" />
+      velocity="1.2" />
   </joint>
   <link
     name="Link2">
@@ -249,7 +249,7 @@
   </link>
   <joint
     name="Joint4"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="0 0.15072565562434 0"
       rpy="0 0 0" />
@@ -260,10 +260,10 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-3.14159"
+      upper="3.14159"
       effort="3"
-      velocity="120" />
+      velocity="1.5" />
   </joint>
   <link
     name="J5_J6">
@@ -305,7 +305,7 @@
   </link>
   <joint
     name="Joint5"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="0 0.247274344375661 0"
       rpy="0 0 0" />
@@ -316,10 +316,10 @@
     <axis
       xyz="-1 0 0" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-1.5708"
+      upper="1.5708"
       effort="3"
-      velocity="120" />
+      velocity="1.5" />
   </joint>
   <link
     name="End_Effector">
@@ -360,7 +360,7 @@
   </link>
   <joint
     name="Joint6"
-    type="continuous">
+    type="revolute">
     <origin
       xyz="0 0.0283977850233832 0"
       rpy="3.14159265358975 0 -3.14159265358979" />
@@ -371,10 +371,10 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-3.14"
-      upper="3.14"
+      lower="-3.14159"
+      upper="3.14159"
       effort="0.8"
-      velocity="150" />
+      velocity="1.8" />
   </joint>
   <ros2_control name="EngineerArmSystem" type="system">
     <hardware>
