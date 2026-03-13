@@ -7,7 +7,7 @@ moveit_servo:
   scale:
     linear: 1.0       # m/s per unit (command_in_type=speed_units: no scaling needed)
     rotational: 1.0   # rad/s per unit
-    joint: 0.5        # rad/s per unit
+    joint: 1.0        # rad/s per unit (DLS computes physical rad/s: no scaling needed)
 
   cartesian_command_in_topic: ~/delta_twist_cmds
   joint_command_in_topic: ~/delta_joint_cmds
@@ -15,7 +15,7 @@ moveit_servo:
 
   ## Output: JointTrajectory forwarded to arm_controller
   command_out_type: trajectory_msgs/JointTrajectory
-  publish_period: 0.034      # ~30 Hz
+  publish_period: 0.05       # 20 Hz — matches uart_bridge send_rate_hz for full velocity utilization
   low_latency_mode: false
   command_out_topic: /arm_controller/joint_trajectory
   joint_topic: /joint_states

@@ -27,6 +27,22 @@ socket_teleop_node:
     # false = only position is controlled; orientation stays at whatever MoveIt last set.
     control_orientation: true
 
+    # ── DLS singularity-robust control ────────────────────────────────────────
+    # Nakamura–Hanafusa SR-inverse: λ ramps from 0 to λ_max as σ_min drops
+    # below dls_sigma_threshold.  Keeps joint velocities bounded through singularity.
+    dls_lambda_max: 0.1        # max damping factor (tune up if arm still jerks)
+    dls_sigma_threshold: 0.05  # σ_min below this activates damping
+
+    # Joint names and per-joint velocity limits (must match URDF)
+    joint_names:
+      - Joint1
+      - Joint2
+      - Joint3
+      - Joint4
+      - Joint5
+      - Joint6
+    joint_velocity_limits: [1.2, 1.2, 1.2, 1.5, 1.5, 1.8]
+
 ik_teleop_node:
   ros__parameters:
     # TCP socket the arm_vision client connects to (same protocol as socket_teleop_node)

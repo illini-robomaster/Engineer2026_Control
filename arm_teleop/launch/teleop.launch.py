@@ -26,6 +26,13 @@ def generate_launch_description():
     pkg = Path(get_package_share_directory('arm_teleop'))
     teleop_params = str(pkg / 'config' / 'teleop_params.yaml')
 
+    # Pass URDF to socket_teleop_node so it can build the KDL chain for DLS control
+    urdf_path = (
+        Path(get_package_share_directory('robotic_arm_v4_urdf'))
+        / 'urdf' / 'robotic_arm_v4_urdf.urdf'
+    )
+    robot_description = {'robot_description': urdf_path.read_text()}
+
     host        = LaunchConfiguration('host')
     port        = LaunchConfiguration('port')
     teleop_mode = LaunchConfiguration('teleop_mode')
@@ -40,6 +47,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             teleop_params,
+            robot_description,
             {'host': host, 'port': port},
         ],
         condition=IfCondition(is_servo),

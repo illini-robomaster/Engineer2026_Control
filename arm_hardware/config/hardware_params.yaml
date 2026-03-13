@@ -81,3 +81,8 @@ uart_bridge_node:
     # STM32 feedback is reliable and low-latency; otherwise MoveIt may plan
     # incorrectly due to noise.
     override_joint_states: true
+
+    # Seconds to block servo topic commands after an action-server trajectory
+    # completes (prevents MoveIt Servo halt messages from overwriting the target).
+    # Default was 2.0 s; reduced to avoid long lockout during teleop.
+    servo_hold_after_traj_s: 0.3
