@@ -325,7 +325,7 @@
     name="End_Effector">
     <inertial>
       <origin
-        xyz="0.00247167774495455 -0.352913615431437 -0.145792345770728"
+        xyz="0.1247167774495455 -0.352913615431437 -0.145792345770728"
         rpy="0 0 0" />
       <mass
         value="6.3501062852158" />
@@ -339,8 +339,8 @@
     </inertial>
     <visual>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="-0.1 0 0"
+        rpy="0 1.57075 -1.57075" />
       <geometry>
         <mesh
           filename="package://robotic_arm_v4_urdf/meshes/End_Effector.STL" />
@@ -352,9 +352,9 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0.09 0" rpy="0 0 0" />
+      <origin xyz="-0.02 0 0" rpy="1.57075 0 0" />
       <geometry>
-        <box size="0.15 0.14 0.06" />
+        <box size="0.12 0.14 0.06" />
       </geometry>
     </collision>
   </link>
@@ -362,14 +362,14 @@
     name="Joint6"
     type="revolute">
     <origin
-      xyz="0 0.0283977850233832 0"
-      rpy="3.14159265358975 0 -3.14159265358979" />
+      xyz="0 0.1283977850233832 0"
+      rpy="1.5707 0 1.5707" />
     <parent
       link="J5_J6" />
     <child
       link="End_Effector" />
     <axis
-      xyz="0 1 0" />
+      xyz="1 0 0" />
     <limit
       lower="-3.14159"
       upper="3.14159"
