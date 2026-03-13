@@ -27,6 +27,43 @@ socket_teleop_node:
     # false = only position is controlled; orientation stays at whatever MoveIt last set.
     control_orientation: true
 
+ik_teleop_node:
+  ros__parameters:
+    # TCP socket the arm_vision client connects to (same protocol as socket_teleop_node)
+    host: "0.0.0.0"
+    port: 9999
+
+    # TF frame names
+    base_frame: "base_link"
+    ee_frame: "End_Effector"
+
+    # MoveIt planning group for /compute_ik service
+    ik_group_name: "arm"
+
+    # Max rate to call IK and publish joint positions (Hz)
+    publish_rate_hz: 10.0
+
+    # Don't re-solve IK if target moved less than this (m)
+    position_deadband_m: 0.005
+
+    # /compute_ik service timeout (s) — KDL gets this long per attempt × 10 attempts
+    ik_timeout_s: 0.5
+
+    # time_from_start for the single-point JointTrajectory sent to arm_controller
+    traj_duration_s: 0.2
+
+    # Hold position if no TCP message received for this long (s)
+    detection_timeout_s: 0.4
+
+    # Ordered joint names — must match SRDF group order
+    joint_names:
+      - Joint1
+      - Joint2
+      - Joint3
+      - Joint4
+      - Joint5
+      - Joint6
+
 keyboard_teleop_node:
   ros__parameters:
     base_frame: "base_link"

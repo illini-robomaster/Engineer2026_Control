@@ -64,6 +64,7 @@ def generate_launch_description() -> LaunchDescription:
 
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")
     use_real_robot  = LaunchConfiguration("use_real_robot")
+    use_servo       = LaunchConfiguration("use_servo")
 
     control_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(pkg_share / "launch" / "control.launch.py")),
@@ -89,21 +90,6 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
-    # MoveIt Servo node: handles real-time Cartesian/joint velocity streaming.
-    # Starts after move_group is fully up (4 s delay).
-    servo_node = Node(
-        package="moveit_servo",
-        executable="servo_node_main",
-        name="servo_node",
-        output="screen",
-        parameters=[
-            _load_yaml(servo_params_path),
-            robot_description,
-            robot_description_semantic,
-            robot_description_kinematics,
-        ],
-    )
-
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -121,9 +107,23 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("use_moveit_rviz", default_value="true"),
             DeclareLaunchArgument("use_real_robot",  default_value="false"),
+            DeclareLaunchArgument("use_servo",       default_value="true",
+                description="false skips servo_node (use with teleop_mode:=ik_direct)"),
             control_launch,
             TimerAction(period=2.0, actions=[move_group_node]),
-            TimerAction(period=4.0, actions=[servo_node]),
+            TimerAction(period=4.0, actions=[Node(
+                package="moveit_servo",
+                executable="servo_node_main",
+                name="servo_node",
+                output="screen",
+                parameters=[
+                    _load_yaml(servo_params_path),
+                    robot_description,
+                    robot_description_semantic,
+                    robot_description_kinematics,
+                ],
+                condition=IfCondition(use_servo),
+            )]),
             TimerAction(period=2.0, actions=[rviz_node]),
             # MoveIt Servo 2.5.x starts paused; call start_servo once it is initialised.
             TimerAction(period=6.0, actions=[
@@ -132,6 +132,7 @@ def generate_launch_description() -> LaunchDescription:
                          '/servo_node/start_servo',
                          'std_srvs/srv/Trigger', '{}'],
                     output='screen',
+                    condition=IfCondition(use_servo),
                 )
             ]),
         ]

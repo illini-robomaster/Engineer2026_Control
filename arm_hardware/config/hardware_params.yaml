@@ -80,4 +80,4 @@ uart_bridge_node:
     # scene with actual (not commanded) positions.  Only enable this when the
     # STM32 feedback is reliable and low-latency; otherwise MoveIt may plan
     # incorrectly due to noise.
-    override_joint_states: false
+    override_joint_states: true

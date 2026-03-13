@@ -64,7 +64,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -77,6 +77,7 @@ def generate_launch_description():
     uart_port       = LaunchConfiguration('uart_port')
     baud_rate       = LaunchConfiguration('baud_rate')
     use_teleop      = LaunchConfiguration('use_teleop')
+    teleop_mode     = LaunchConfiguration('teleop_mode')
     socket_host     = LaunchConfiguration('socket_host')
     socket_port     = LaunchConfiguration('socket_port')
     use_moveit_rviz = LaunchConfiguration('use_moveit_rviz')
@@ -85,12 +86,18 @@ def generate_launch_description():
     debug_tx        = LaunchConfiguration('debug_tx')
     debug_rx        = LaunchConfiguration('debug_rx')
 
+    # Servo is only needed in the default 'servo' mode
+    use_servo = PythonExpression(["'", teleop_mode, "' != 'ik_direct'"])
+
     # ── MoveIt2 + ros2_control + servo_node + RViz ───────────────────────────
     moveit_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(arm_urdf_share / 'launch' / 'moveit_control.launch.py')),
         launch_arguments={
-            'use_moveit_rviz': use_moveit_rviz,            'use_real_robot':  use_real_robot,        }.items(),
+            'use_moveit_rviz': use_moveit_rviz,
+            'use_real_robot':  use_real_robot,
+            'use_servo':       use_servo,
+        }.items(),
     )
 
     # ── Socket teleop node (receives poses from arm_vision client) ────────────
@@ -98,8 +105,9 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             str(arm_teleop_share / 'launch' / 'teleop.launch.py')),
         launch_arguments={
-            'host': socket_host,
-            'port': socket_port,
+            'host':        socket_host,
+            'port':        socket_port,
+            'teleop_mode': teleop_mode,
         }.items(),
         condition=IfCondition(use_teleop),
     )
@@ -131,6 +139,8 @@ def generate_launch_description():
         DeclareLaunchArgument('uart_port',       default_value=''),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
         DeclareLaunchArgument('use_teleop',      default_value='true'),
+        DeclareLaunchArgument('teleop_mode',     default_value='servo',
+            description='"servo" (default) or "ik_direct" (skips servo_node, uses /compute_ik)'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),

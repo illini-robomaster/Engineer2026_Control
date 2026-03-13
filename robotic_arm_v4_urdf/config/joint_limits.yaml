@@ -1,5 +1,5 @@
-default_velocity_scaling_factor: 0.1
-default_acceleration_scaling_factor: 0.1
+default_velocity_scaling_factor: 1.0
+default_acceleration_scaling_factor: 1.0
 
 joint_limits:
   Joint1:

@@ -316,26 +316,29 @@ class SocketTeleopNode(Node):
 
         rpy_tgt = Rotation.from_quat(target_quat).as_euler('xyz', degrees=True)
 
-        # Current EE pose for orientation error display
-        rot_err_str = 'n/a (ctrl_ori=false)'
-        if self._ctrl_orient:
-            try:
-                tf = self._tf_buf.lookup_transform(
-                    self._base_frame, self._ee_frame, Time())
-                r = tf.transform.rotation
-                cur_q = np.array([r.x, r.y, r.z, r.w])
-                rot_err = q_error_rotvec(target_quat, cur_q)
-                rot_err_str = f'{math.degrees(float(np.linalg.norm(rot_err))):.1f}°'
-            except Exception as exc:
-                rot_err_str = f'TF fail: {exc}'
+        # Current EE pose for error display
+        pos_err_str = 'TF unavailable'
+        rot_err_str = 'TF unavailable'
+        try:
+            tf = self._tf_buf.lookup_transform(
+                self._base_frame, self._ee_frame, Time())
+            t = tf.transform.translation
+            r = tf.transform.rotation
+            cur_pos = np.array([t.x, t.y, t.z])
+            cur_q   = np.array([r.x, r.y, r.z, r.w])
+            pos_err_m = float(np.linalg.norm(target_pos - cur_pos))
+            pos_err_str = f'{pos_err_m * 1000:.1f}mm'
+            rot_err = q_error_rotvec(target_quat, cur_q)
+            rot_err_str = f'{math.degrees(float(np.linalg.norm(rot_err))):.1f}°'
+        except Exception as exc:
+            pos_err_str = rot_err_str = f'TF fail: {type(exc).__name__}: {exc}'
 
         self.get_logger().info(
             f'[diag] socket={recv_hz:.0f}Hz  pub={pub_hz:.0f}Hz  '
             f'tf_fails={tf_fails}  msg_age={age:.2f}s  '
-            f'ctrl_ori={self._ctrl_orient}  '
-            f'tgt_pos=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})  '
+            f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})  '
             f'tgt_rpy=({rpy_tgt[0]:.1f}°,{rpy_tgt[1]:.1f}°,{rpy_tgt[2]:.1f}°)  '
-            f'ori_err={rot_err_str}')
+            f'pos_err={pos_err_str}  ori_err={rot_err_str}')
 
 
 def main(args=None):
