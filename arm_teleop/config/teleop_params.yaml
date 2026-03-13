@@ -9,12 +9,12 @@ socket_teleop_node:
     base_frame: "base_link"
 
     # Proportional controller gains (servo sends these as speed commands)
-    kp_linear: 1.5      # m/s per m of position error
-    kp_angular: 2.0     # rad/s per rad of orientation error
+    kp_linear: 5.0      # m/s per m of position error
+    kp_angular: 4.0     # rad/s per rad of orientation error
 
     # Clamp output to these max speeds (passed to moveit_servo)
-    max_linear_speed: 0.25    # m/s
-    max_angular_speed: 0.5    # rad/s
+    max_linear_speed: 1.5     # m/s  (capped further by URDF joint velocity limits in servo)
+    max_angular_speed: 2.0    # rad/s
 
     # Deadband: suppress commands when pose error is below this threshold
     deadband_pos_m: 0.008      # 8 mm

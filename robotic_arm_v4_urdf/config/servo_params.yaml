@@ -5,8 +5,8 @@ moveit_servo:
   ## Input: TwistStamped on ~/delta_twist_cmds or JointJog on ~/delta_joint_cmds
   command_in_type: "speed_units"   # twist linear = m/s, angular = rad/s
   scale:
-    linear: 0.4       # m/s per unit
-    rotational: 0.8   # rad/s per unit
+    linear: 1.0       # m/s per unit (command_in_type=speed_units: no scaling needed)
+    rotational: 1.0   # rad/s per unit
     joint: 0.5        # rad/s per unit
 
   cartesian_command_in_topic: ~/delta_twist_cmds
@@ -28,8 +28,8 @@ moveit_servo:
   ## Safety
   incoming_command_timeout: 0.5
   num_outgoing_halt_msgs_to_publish: 4
-  halt_all_joints_in_joint_mode: true
-  halt_all_joints_in_cartesian_mode: true
+  halt_all_joints_in_joint_mode: false
+  halt_all_joints_in_cartesian_mode: false
 
   ## Singularity protection — disabled; velocity clamping is handled by the STM32.
   lower_singularity_threshold: 1000.0
