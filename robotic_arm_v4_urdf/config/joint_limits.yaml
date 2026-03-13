@@ -6,47 +6,47 @@ joint_limits:
     has_position_limits: true
     min_position: -3.14159   # -180 deg  (joint space; motor sees ±360 deg via 2:1 gear)
     max_position:  3.14159   # +180 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.2
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 1.5
   Joint2:
     has_position_limits: true
     min_position: -1.5708    # -90 deg
     max_position:  1.5708    # +90 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.2
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 1.5
   Joint3:
     has_position_limits: true
     min_position: -1.20      # -68.75 deg
     max_position:  4.0       # +229.18 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.2
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 1.5
   Joint4:
     has_position_limits: true
     min_position: -3.14159   # -180 deg
     max_position:  3.14159   # +180 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.5
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 2.0
   Joint5:
     has_position_limits: true
     min_position: -1.5708    # -90 deg
     max_position:  1.5708    # +90 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.5
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 2.0
   Joint6:
     has_position_limits: true
     min_position: -3.14159   # -180 deg
     max_position:  3.14159   # +180 deg
-    has_velocity_limits: true
+    has_velocity_limits: false
     max_velocity: 1.8
-    has_acceleration_limits: true
+    has_acceleration_limits: false
     max_acceleration: 2.5

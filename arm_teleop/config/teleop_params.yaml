@@ -13,8 +13,8 @@ socket_teleop_node:
     kp_angular: 2.0     # rad/s per rad of orientation error
 
     # Clamp output to these max speeds (passed to moveit_servo)
-    max_linear_speed: 0.25    # m/s
-    max_angular_speed: 0.5    # rad/s
+    max_linear_speed: 2.25    # m/s
+    max_angular_speed: 2.5    # rad/s
 
     # Deadband: suppress commands when pose error is below this threshold
     deadband_pos_m: 0.008      # 8 mm
@@ -41,7 +41,7 @@ ik_teleop_node:
     ik_group_name: "arm"
 
     # Max rate to call IK and publish joint positions (Hz)
-    publish_rate_hz: 10.0
+    publish_rate_hz: 30.0
 
     # Don't re-solve IK if target moved less than this (m)
     position_deadband_m: 0.005

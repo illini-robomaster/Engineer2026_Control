@@ -56,6 +56,38 @@ def cmd_calibrate_cube(args: argparse.Namespace):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# camera utils
+# ─────────────────────────────────────────────────────────────────────────────
+
+def open_camera(device: int) -> tuple[cv2.VideoCapture | None, str]:
+    """Open a camera with a backend that matches the current platform."""
+    if sys.platform.startswith('win'):
+        candidates = (
+            ('CAP_DSHOW', cv2.CAP_DSHOW),
+            ('CAP_ANY', cv2.CAP_ANY),
+        )
+    elif sys.platform.startswith('linux'):
+        candidates = (
+            ('CAP_V4L2', cv2.CAP_V4L2),
+            ('CAP_ANY', cv2.CAP_ANY),
+        )
+    else:
+        candidates = (('CAP_ANY', cv2.CAP_ANY),)
+
+    for backend_name, backend in candidates:
+        cap = (
+            cv2.VideoCapture(device)
+            if backend == cv2.CAP_ANY
+            else cv2.VideoCapture(device, backend)
+        )
+        if cap.isOpened():
+            return cap, backend_name
+        cap.release()
+
+    return None, ' / '.join(name for name, _ in candidates)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # run
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -73,11 +105,16 @@ def cmd_run(args: argparse.Namespace):
     detector = CubeDetector(K, dist, cube_cfg)
     mapper   = WorkspaceMapper(args.workspace_config)
 
-    cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
+    cap, backend_name = open_camera(args.device)
+    if cap is None:
+        sys.exit(
+            f'[ERROR] Cannot open camera device {args.device} '
+            f'(tried {backend_name})'
+        )
+
+    print(f'Using camera device {args.device} via {backend_name}.')
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
     cap.set(cv2.CAP_PROP_EXPOSURE, -2)
-    if not cap.isOpened():
-        sys.exit(f'[ERROR] Cannot open camera device {args.device}')
 
     if args.no_socket:
         print('Socket disabled — running in local visualization mode.')
