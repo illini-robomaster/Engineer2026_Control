@@ -54,18 +54,89 @@ Start arm_vision client (no ROS needed, separate terminal):
   cd arm_vision && python main.py run
 """
 
+import subprocess
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    OpaqueFunction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+
+
+def _kill_stale_ros_nodes(context):
+    """Kill any lingering ROS 2 nodes from a previous session.
+
+    Uses process-name matching (pkill without -f) for C++ executables so we
+    don't accidentally kill the current launch process (whose full cmdline
+    contains these names as arguments).  Python nodes are matched by their
+    script name with -f, excluding our own process tree.
+    """
+    import os
+
+    own_pgid = os.getpgrp()
+
+    # C++ executables — safe to match by process name (no -f)
+    native_targets = [
+        'move_group',
+        'servo_node_main',
+        'robot_state_pub',   # truncated to 15 chars for comm matching
+        'ros2_control_no',   # truncated to 15 chars
+        'rviz2',
+    ]
+    for name in native_targets:
+        subprocess.run(
+            ['pkill', '-9', name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # Python nodes — must use -f but exclude our own process group
+    python_targets = [
+        'uart_bridge_node',
+        'socket_teleop_node',
+        'joint_monitor_node',
+        'homing_node',
+        'spawner',
+    ]
+    for name in python_targets:
+        result = subprocess.run(
+            ['pgrep', '-f', name], capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.strip().splitlines():
+            pid = int(line)
+            # Skip any process in our own process group (the new launch)
+            try:
+                if os.getpgid(pid) == own_pgid:
+                    continue
+                os.kill(pid, 9)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    # Stop the ROS 2 daemon so topic/service caches are fresh
+    subprocess.run(
+        ['ros2', 'daemon', 'stop'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    # Purge FastRTPS shared-memory segments that cache stale DDS messages
+    # (e.g. last-published /joint_states with transient-local durability).
+    import glob as globmod
+    for shm in globmod.glob('/dev/shm/fastrtps_*'):
+        try:
+            os.remove(shm)
+        except OSError:
+            pass
+
+    return []
 
 
 def generate_launch_description():
@@ -134,7 +205,12 @@ def generate_launch_description():
         condition=IfCondition(use_real_robot),
     )
 
+    # ── Kill stale nodes from previous session before launching ────────────
+    cleanup = OpaqueFunction(function=_kill_stale_ros_nodes)
+
     return LaunchDescription([
+        cleanup,
+
         DeclareLaunchArgument('use_real_robot',  default_value='false'),
         DeclareLaunchArgument('uart_port',       default_value=''),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
