@@ -73,7 +73,9 @@ def cmd_run(args: argparse.Namespace):
     detector = CubeDetector(K, dist, cube_cfg)
     mapper   = WorkspaceMapper(args.workspace_config)
 
-    cap = cv2.VideoCapture(args.device)
+    cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    cap.set(cv2.CAP_PROP_EXPOSURE, -2)
     if not cap.isOpened():
         sys.exit(f'[ERROR] Cannot open camera device {args.device}')
 
