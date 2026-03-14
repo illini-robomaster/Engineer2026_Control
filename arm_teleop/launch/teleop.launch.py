@@ -60,6 +60,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             teleop_params,
+            robot_description,
             {'host': host, 'port': port},
         ],
         condition=IfCondition(is_ik),

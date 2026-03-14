@@ -216,7 +216,7 @@ def generate_launch_description():
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
         DeclareLaunchArgument('use_teleop',      default_value='true'),
         DeclareLaunchArgument('teleop_mode',     default_value='servo',
-            description='"servo" (default) or "ik_direct" (skips servo_node, uses /compute_ik)'),
+            description='"servo" (default) or "ik_direct" (skips servo_node, uses inline PyKDL IK)'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),
