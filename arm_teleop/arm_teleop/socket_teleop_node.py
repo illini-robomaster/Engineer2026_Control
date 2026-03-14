@@ -11,7 +11,7 @@ DLS guarantees bounded joint velocities even at exact singularities — the arm
 will never e-stop due to a Jacobian blow-up.  Away from singularity the DLS
 inverse equals the standard pseudoinverse (no accuracy penalty).
 
-Requires python3-pykdl and python3-kdl-parser (ros-<distro>-kdl-parser-py).
+Requires python3-pykdl and urdfdom_py.
 Also requires robot_description to be passed as a node parameter — see
 teleop.launch.py.
 
@@ -49,7 +49,6 @@ from typing import Optional
 
 import numpy as np
 import PyKDL
-from kdl_parser_py import urdf as kdl_urdf
 from urdf_parser_py import urdf as urdf_parser
 
 import rclpy
@@ -90,6 +89,76 @@ def q_error_rotvec(q_target: np.ndarray, q_current: np.ndarray) -> np.ndarray:
         return np.zeros(3)
     angle = 2.0 * math.atan2(vec_norm, float(q_err[3]))
     return (angle / vec_norm) * vec
+
+
+def _pose_to_kdl_frame(pose) -> PyKDL.Frame:
+    xyz = [0.0, 0.0, 0.0]
+    rpy = [0.0, 0.0, 0.0]
+    if pose is not None:
+        if pose.xyz is not None:
+            xyz = [float(v) for v in pose.xyz]
+        if pose.rpy is not None:
+            rpy = [float(v) for v in pose.rpy]
+    return PyKDL.Frame(PyKDL.Rotation.RPY(*rpy), PyKDL.Vector(*xyz))
+
+
+def _urdf_joint_to_kdl_joint(joint, joint_frame: PyKDL.Frame) -> PyKDL.Joint:
+    axis = joint.axis if joint.axis is not None else [1.0, 0.0, 0.0]
+    axis_vec = joint_frame.M * PyKDL.Vector(*[float(v) for v in axis])
+
+    if joint.type in ('revolute', 'continuous'):
+        return PyKDL.Joint(joint.name, joint_frame.p, axis_vec, PyKDL.Joint.RotAxis)
+    if joint.type == 'prismatic':
+        return PyKDL.Joint(joint.name, joint_frame.p, axis_vec, PyKDL.Joint.TransAxis)
+    return PyKDL.Joint(joint.name, PyKDL.Joint.Fixed)
+
+
+def _build_kdl_tree(robot_model) -> PyKDL.Tree:
+    """Build a KDL tree without kdl_parser_py, which is often absent in ROS 2 installs."""
+    child_links = {joint.child for joint in robot_model.joints}
+    parent_links = {joint.parent for joint in robot_model.joints}
+    root_links = sorted(parent_links - child_links)
+    if len(root_links) != 1:
+        raise RuntimeError(f'Expected exactly one root link, found: {root_links}')
+
+    root_link = root_links[0]
+    tree = PyKDL.Tree(root_link)
+    child_to_joint = {joint.child: joint for joint in robot_model.joints}
+    remaining_links = {link.name for link in robot_model.links if link.name != root_link}
+
+    while remaining_links:
+        progressed = False
+        for link_name in list(remaining_links):
+            joint = child_to_joint.get(link_name)
+            if joint is None:
+                raise RuntimeError(f'Link {link_name} is not attached to any joint.')
+            if joint.parent in remaining_links:
+                continue
+
+            joint_frame = _pose_to_kdl_frame(joint.origin)
+            segment = PyKDL.Segment(
+                link_name,
+                _urdf_joint_to_kdl_joint(joint, joint_frame),
+                joint_frame,
+            )
+            if not tree.addSegment(segment, joint.parent):
+                raise RuntimeError(
+                    f'Failed to add KDL segment {link_name} under parent {joint.parent}.')
+            remaining_links.remove(link_name)
+            progressed = True
+
+        if not progressed:
+            remaining = ', '.join(sorted(remaining_links))
+            raise RuntimeError(f'Could not resolve URDF tree ordering for links: {remaining}')
+
+    return tree
+
+
+def _build_kdl_chain(robot_desc: str, base_frame: str, ee_frame: str) -> PyKDL.Chain:
+    xml_data = robot_desc.encode('utf-8')
+    robot_model = urdf_parser.URDF.from_xml_string(xml_data)
+    tree = _build_kdl_tree(robot_model)
+    return tree.getChain(base_frame, ee_frame)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,11 +239,8 @@ class SocketTeleopNode(Node):
         self._kdl_chain  = None
         if robot_desc:
             try:
-                robot_model = urdf_parser.URDF.from_xml_string(robot_desc)
-                ok, tree = kdl_urdf.treeFromUrdfModel(robot_model)
-                if not ok:
-                    raise RuntimeError('kdl_urdf.treeFromUrdfModel returned False')
-                self._kdl_chain  = tree.getChain(self._base_frame, self._ee_frame)
+                self._kdl_chain = _build_kdl_chain(
+                    robot_desc, self._base_frame, self._ee_frame)
                 self._jac_solver = PyKDL.ChainJntToJacSolver(self._kdl_chain)
                 n = self._kdl_chain.getNrOfJoints()
                 self.get_logger().info(

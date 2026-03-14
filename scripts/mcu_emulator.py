@@ -68,7 +68,7 @@ def unpack_frame(data: bytes) -> list[float] | None:
 # ── Colours for terminal output ───────────────────────────────────────────
 
 C_RESET  = '\033[0m'
-C_RX     = '\033[36m'   # cyan  — frames we receive (bridge TX)
+C_RX     = '\033[92m'   # bright green — frames we receive (bridge TX)
 C_TX     = '\033[33m'   # yellow — frames we send   (bridge RX)
 C_WARN   = '\033[31m'   # red
 C_INFO   = '\033[32m'   # green

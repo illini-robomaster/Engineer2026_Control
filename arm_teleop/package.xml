@@ -20,7 +20,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-pykdl</exec_depend>
-  <exec_depend>python3-kdl-parser</exec_depend>
+  <exec_depend>urdfdom_py</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
