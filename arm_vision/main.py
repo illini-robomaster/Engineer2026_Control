@@ -75,7 +75,12 @@ def cmd_run(args: argparse.Namespace):
 
     cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -2)
+    cap.set(cv2.CAP_PROP_EXPOSURE, -8)
+    cap.set(cv2.CAP_PROP_GAIN, 100)
+    cap.set(cv2.CAP_PROP_CONTRAST, 200)
+    print(f"Exposure:  {cap.get(cv2.CAP_PROP_EXPOSURE)}")
+    print(f"Gain:      {cap.get(cv2.CAP_PROP_GAIN)}")
+    print(f"Contrast:  {cap.get(cv2.CAP_PROP_CONTRAST)}")
     if not cap.isOpened():
         sys.exit(f'[ERROR] Cannot open camera device {args.device}')
 
