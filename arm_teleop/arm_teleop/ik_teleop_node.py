@@ -2,14 +2,15 @@
 """
 IK-direct teleoperation node.
 
-Receives 6D target poses from arm_vision over TCP.  Solves IK inline with
-PyKDL (Newton-Raphson + joint-limit clamping) at 30 Hz — no MoveIt planning
-stack required.  Seeds each solve from the last IK solution so the solver
-always starts close to the current configuration and returns a consistent,
-nearby joint-space solution.  The first solve bootstraps the seed from
-/joint_states; after that the node is independent of encoder feedback.
+Receives 6D target poses from arm_vision over TCP.  Solves IK using TRAC-IK
+(SQP + random restarts with "Distance" mode) which reliably finds solutions
+across the full workspace — including large initial displacements where KDL
+Newton-Raphson fails.  Seeds each solve from /joint_states for solution
+continuity.
 
-Socket protocol: newline-delimited JSON (same as socket_teleop_node)
+Requires: sudo apt install ros-$ROS_DISTRO-trac-ik
+
+Socket protocol: newline-delimited JSON
   {"x": 0.1, "y": 0.2, "z": 0.3, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
 
 Parameters:
@@ -17,11 +18,11 @@ Parameters:
   port                : bind port              (default: 9999)
   base_frame          : robot base TF frame    (default: "base_link")
   ee_frame            : end-effector link name (default: "End_Effector")
-  publish_rate_hz     : IK solve + publish rate Hz  (default: 30.0)
+  publish_rate_hz     : IK solve + publish rate Hz   (default: 30.0)
+  ik_timeout_s        : time budget per IK solve     (default: 0.005)
   traj_duration_s     : time_from_start in published JointTrajectory (default: 0.05)
   detection_timeout_s : hold if no TCP message for this long (default: 0.4)
-  joint_names         : ordered joint list     (default: Joint1…Joint6)
-  robot_description   : URDF XML string for KDL chain (passed by launch file)
+  robot_description   : URDF XML string (passed by launch file)
 """
 
 from __future__ import annotations
@@ -33,8 +34,7 @@ import time
 from typing import Optional
 
 import numpy as np
-import PyKDL
-from urdf_parser_py import urdf as urdf_parser
+from trac_ik_python.trac_ik import IK as TracIK
 
 import rclpy
 from builtin_interfaces.msg import Duration
@@ -42,92 +42,6 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from rclpy.node import Node
 
-
-# ── KDL chain builder (mirrors socket_teleop_node) ───────────────────────────
-
-def _pose_to_kdl_frame(pose) -> PyKDL.Frame:
-    xyz = [0.0, 0.0, 0.0]
-    rpy = [0.0, 0.0, 0.0]
-    if pose is not None:
-        if pose.xyz is not None:
-            xyz = [float(v) for v in pose.xyz]
-        if pose.rpy is not None:
-            rpy = [float(v) for v in pose.rpy]
-    return PyKDL.Frame(PyKDL.Rotation.RPY(*rpy), PyKDL.Vector(*xyz))
-
-
-def _urdf_joint_to_kdl_joint(joint, joint_frame: PyKDL.Frame) -> PyKDL.Joint:
-    axis = joint.axis if joint.axis is not None else [1.0, 0.0, 0.0]
-    axis_vec = joint_frame.M * PyKDL.Vector(*[float(v) for v in axis])
-    if joint.type in ('revolute', 'continuous'):
-        return PyKDL.Joint(joint.name, joint_frame.p, axis_vec, PyKDL.Joint.RotAxis)
-    if joint.type == 'prismatic':
-        return PyKDL.Joint(joint.name, joint_frame.p, axis_vec, PyKDL.Joint.TransAxis)
-    return PyKDL.Joint(joint.name, PyKDL.Joint.Fixed)
-
-
-def _build_kdl_tree(robot_model) -> PyKDL.Tree:
-    child_links  = {joint.child  for joint in robot_model.joints}
-    parent_links = {joint.parent for joint in robot_model.joints}
-    root_links   = sorted(parent_links - child_links)
-    if len(root_links) != 1:
-        raise RuntimeError(f'Expected exactly one root link, found: {root_links}')
-
-    root_link      = root_links[0]
-    tree           = PyKDL.Tree(root_link)
-    child_to_joint = {joint.child: joint for joint in robot_model.joints}
-    remaining      = {link.name for link in robot_model.links if link.name != root_link}
-
-    while remaining:
-        progressed = False
-        for link_name in list(remaining):
-            joint = child_to_joint.get(link_name)
-            if joint is None:
-                raise RuntimeError(f'Link {link_name} is not attached to any joint.')
-            if joint.parent in remaining:
-                continue
-            joint_frame = _pose_to_kdl_frame(joint.origin)
-            segment = PyKDL.Segment(
-                link_name,
-                _urdf_joint_to_kdl_joint(joint, joint_frame),
-                joint_frame,
-            )
-            if not tree.addSegment(segment, joint.parent):
-                raise RuntimeError(
-                    f'Failed to add KDL segment {link_name} under parent {joint.parent}.')
-            remaining.remove(link_name)
-            progressed = True
-        if not progressed:
-            raise RuntimeError(
-                f'Could not resolve URDF tree for links: {", ".join(sorted(remaining))}')
-
-    return tree
-
-
-def _build_kdl_chain(robot_desc: str, base_frame: str, ee_frame: str) -> PyKDL.Chain:
-    robot_model = urdf_parser.URDF.from_xml_string(robot_desc.encode('utf-8'))
-    tree = _build_kdl_tree(robot_model)
-    return tree.getChain(base_frame, ee_frame)
-
-
-def _joint_limits_from_urdf(robot_desc: str, joint_names: list):
-    """Return (q_min, q_max) as lists of floats in joint_names order."""
-    robot_model = urdf_parser.URDF.from_xml_string(robot_desc.encode('utf-8'))
-    joint_map   = {j.name: j for j in robot_model.joints}
-    q_min, q_max = [], []
-    for name in joint_names:
-        j = joint_map.get(name)
-        if j and j.limit:
-            lo = float(j.limit.lower) if j.limit.lower is not None else -3.14159
-            hi = float(j.limit.upper) if j.limit.upper is not None else  3.14159
-        else:
-            lo, hi = -3.14159, 3.14159
-        q_min.append(lo)
-        q_max.append(hi)
-    return q_min, q_max
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 class IkTeleopNode(Node):
 
@@ -141,10 +55,9 @@ class IkTeleopNode(Node):
         self._base_frame  = p('base_frame',         'base_link')
         self._ee_frame    = p('ee_frame',            'End_Effector')
         self._rate_hz     = p('publish_rate_hz',     30.0)
+        self._ik_timeout  = p('ik_timeout_s',        0.005)
         self._traj_dur    = p('traj_duration_s',     0.05)
         self._det_timeout = p('detection_timeout_s', 0.4)
-        self._joint_names = list(p('joint_names',
-            ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6']))
         robot_desc        = p('robot_description',   '')
 
         # ── Publisher ────────────────────────────────────────────────────────
@@ -153,49 +66,39 @@ class IkTeleopNode(Node):
 
         # ── Shared state ─────────────────────────────────────────────────────
         self._lock               = threading.Lock()
-        self._joint_pos: dict    = {}                       # bootstrap seed only
+        self._joint_pos: dict    = {}
         self._target_pos: Optional[np.ndarray]  = None
         self._target_quat: Optional[np.ndarray] = None
         self._last_recv_time: float = 0.0
         self._last_solved_joints: Optional[list] = None    # diagnostics only
 
-        # ── /joint_states subscriber (bootstrap seed for first IK solve) ─────
+        # ── /joint_states subscriber ──────────────────────────────────────────
         self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
 
-        # ── KDL IK solver ────────────────────────────────────────────────────
-        self._ik_solver = None
-        self._n_joints  = 0
+        # ── TRAC-IK solver ────────────────────────────────────────────────────
+        # "Distance" mode: returns the solution closest in joint space to the seed,
+        # giving smooth motion during continuous tracking.
+        self._ik_solver   = None
+        self._joint_names = []   # derived from solver (guaranteed correct order)
         if robot_desc:
             try:
-                chain = _build_kdl_chain(robot_desc, self._base_frame, self._ee_frame)
-                self._n_joints = chain.getNrOfJoints()
-
-                fk_solver  = PyKDL.ChainFkSolverPos_recursive(chain)
-                vel_solver = PyKDL.ChainIkSolverVel_pinv(chain)
-
-                q_min_list, q_max_list = _joint_limits_from_urdf(
-                    robot_desc, self._joint_names)
-                q_min_kdl = PyKDL.JntArray(self._n_joints)
-                q_max_kdl = PyKDL.JntArray(self._n_joints)
-                for i in range(self._n_joints):
-                    q_min_kdl[i] = q_min_list[i]
-                    q_max_kdl[i] = q_max_list[i]
-
-                self._ik_solver = PyKDL.ChainIkSolverPos_NR_JL(
-                    chain, q_min_kdl, q_max_kdl,
-                    fk_solver, vel_solver,
-                    maxiter=100, eps=1e-5)
-
-                limits_str = '  '.join(
-                    f'{self._joint_names[i]}=[{q_min_list[i]:.2f},{q_max_list[i]:.2f}]'
-                    for i in range(self._n_joints))
+                self._ik_solver = TracIK(
+                    self._base_frame,
+                    self._ee_frame,
+                    urdf_string=robot_desc,
+                    timeout=self._ik_timeout,
+                    epsilon=1e-5,
+                    solve_type='Distance',
+                )
+                self._joint_names = list(self._ik_solver.joint_names)
                 self.get_logger().info(
-                    f'KDL IK solver ready — {self._n_joints} joints  '
+                    f'TRAC-IK solver ready — {len(self._joint_names)} joints  '
                     f'{self._base_frame}→{self._ee_frame}  '
-                    f'rate={self._rate_hz:.0f}Hz\n  limits: {limits_str}')
+                    f'rate={self._rate_hz:.0f}Hz  timeout={self._ik_timeout*1000:.0f}ms  '
+                    f'joints={self._joint_names}')
             except Exception as exc:
                 self.get_logger().error(
-                    f'KDL IK setup failed ({exc}) — node will not publish joint commands.')
+                    f'TRAC-IK setup failed ({exc}) — node will not publish joint commands.')
         else:
             self.get_logger().error(
                 'robot_description parameter is empty — node will not move the arm.')
@@ -216,7 +119,7 @@ class IkTeleopNode(Node):
             f'ik_teleop_node ready — listening on {self._host}:{self._port}  '
             f'rate={self._rate_hz:.0f}Hz  traj_dur={self._traj_dur*1000:.0f}ms')
 
-    # ── Joint state subscriber (bootstrap only) ───────────────────────────────
+    # ── Joint state subscriber ────────────────────────────────────────────────
 
     def _joint_cb(self, msg: JointState):
         with self._lock:
@@ -261,7 +164,6 @@ class IkTeleopNode(Node):
         with self._lock:
             self._target_pos  = None
             self._target_quat = None
-            # Keep _last_solved_joints so next connect re-seeds from last pose
 
     def _parse_message(self, line: str):
         if not line:
@@ -297,49 +199,41 @@ class IkTeleopNode(Node):
         if target_pos is None or age > self._det_timeout:
             return  # no target or stale — hold last commanded position
 
-        # ── Build IK seed from current /joint_states ─────────────────────────
+        # ── IK seed from /joint_states (solver order) ────────────────────────
         if len(joint_pos) < len(self._joint_names):
             self.get_logger().warn_once(
                 f'Waiting for /joint_states ({len(joint_pos)}/'
                 f'{len(self._joint_names)}) for IK seed')
             return
-        q_seed = PyKDL.JntArray(self._n_joints)
-        for i, name in enumerate(self._joint_names):
-            q_seed[i] = joint_pos.get(name, 0.0)
+        seed = [joint_pos.get(n, 0.0) for n in self._joint_names]
 
-        # ── Target frame (PyKDL quaternion convention: x, y, z, w) ──────────
-        target_frame = PyKDL.Frame(
-            PyKDL.Rotation.Quaternion(
-                float(target_quat[0]), float(target_quat[1]),
-                float(target_quat[2]), float(target_quat[3])),
-            PyKDL.Vector(
-                float(target_pos[0]), float(target_pos[1]), float(target_pos[2])),
+        # ── Solve (TRAC-IK quaternion: x, y, z, w) ───────────────────────────
+        result = self._ik_solver.get_ik(
+            seed,
+            float(target_pos[0]),  float(target_pos[1]),  float(target_pos[2]),
+            float(target_quat[0]), float(target_quat[1]),
+            float(target_quat[2]), float(target_quat[3]),
         )
 
-        # ── Solve ─────────────────────────────────────────────────────────────
-        q_sol = PyKDL.JntArray(self._n_joints)
-        ret   = self._ik_solver.CartToJnt(q_seed, target_frame, q_sol)
-        if ret < 0:
+        if result is None:
             self._diag_fails += 1
             self.get_logger().warn(
-                f'KDL IK no solution (ret={ret})  '
+                f'TRAC-IK no solution  '
                 f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})')
             return
 
-        positions = [float(q_sol[i]) for i in range(self._n_joints)]
-
         # ── Publish ──────────────────────────────────────────────────────────
-        traj             = JointTrajectory()
+        traj              = JointTrajectory()
         traj.header.stamp = self.get_clock().now().to_msg()
         traj.joint_names  = list(self._joint_names)
         pt                = JointTrajectoryPoint()
-        pt.positions      = positions
+        pt.positions      = list(result)
         pt.time_from_start = Duration(sec=0, nanosec=int(self._traj_dur * 1e9))
         traj.points = [pt]
         self._traj_pub.publish(traj)
 
         with self._lock:
-            self._last_solved_joints = positions
+            self._last_solved_joints = list(result)
         self._diag_solves += 1
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
