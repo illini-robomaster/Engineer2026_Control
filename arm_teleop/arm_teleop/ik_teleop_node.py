@@ -190,6 +190,14 @@ class IkTeleopNode(Node):
             self.get_logger().warn_once('/compute_ik service not yet available')
             return
 
+        # Block until we have real joint feedback — seeding KDL at all-zero is a
+        # singularity for most arm configurations and will reliably fail IK.
+        if len(joint_pos) < len(self._joint_names):
+            self.get_logger().warn_once(
+                f'Waiting for /joint_states ({len(joint_pos)}/{len(self._joint_names)} joints) '
+                f'before solving IK — seeding at 0 causes singularity errors')
+            return
+
         # ── Build IK request ─────────────────────────────────────────────────
         req = GetPositionIK.Request()
         req.ik_request.group_name       = self._group
@@ -198,12 +206,11 @@ class IkTeleopNode(Node):
         req.ik_request.attempts         = 10
         req.ik_request.ik_link_name     = self._ee_frame
 
-        # Seed with current joint positions — always provide all joints to avoid
-        # the "Found empty JointState message" warning and improve IK reliability.
-        # Missing joints (before first /joint_states) default to 0.0.
+        # Seed with current joint positions. All joints must be present (checked
+        # above) so we never fall back to 0.0 which is near/at singularity.
         seed = req.ik_request.robot_state.joint_state
         seed.name     = list(self._joint_names)
-        seed.position = [joint_pos.get(n, 0.0) for n in self._joint_names]
+        seed.position = [joint_pos[n] for n in self._joint_names]
 
         # Target pose
         ps = PoseStamped()

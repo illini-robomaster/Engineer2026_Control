@@ -20,11 +20,27 @@
     <joint name="Joint6" value="0.0" />
   </group_state>
 
-  <!-- Adjacent links are always in contact; disable collision checks for those pairs. -->
-  <disable_collisions link1="base_link" link2="Link0"        reason="Adjacent" />
-  <disable_collisions link1="Link0"     link2="Link1"        reason="Adjacent" />
-  <disable_collisions link1="Link1"     link2="J3_J4"        reason="Adjacent" />
-  <disable_collisions link1="J3_J4"     link2="Link2"        reason="Adjacent" />
-  <disable_collisions link1="Link2"     link2="J5_J6"        reason="Adjacent" />
-  <disable_collisions link1="J5_J6"     link2="End_Effector" reason="Adjacent" />
+  <!-- Temporary debug setting: disable all self-collision checks for arm links. -->
+  <disable_collisions link1="base_link" link2="Link0"        reason="DisabledForNow" />
+  <disable_collisions link1="base_link" link2="Link1"        reason="DisabledForNow" />
+  <disable_collisions link1="base_link" link2="J3_J4"        reason="DisabledForNow" />
+  <disable_collisions link1="base_link" link2="Link2"        reason="DisabledForNow" />
+  <disable_collisions link1="base_link" link2="J5_J6"        reason="DisabledForNow" />
+  <disable_collisions link1="base_link" link2="End_Effector" reason="DisabledForNow" />
+  <disable_collisions link1="Link0"     link2="Link1"        reason="DisabledForNow" />
+  <disable_collisions link1="Link0"     link2="J3_J4"        reason="DisabledForNow" />
+  <disable_collisions link1="Link0"     link2="Link2"        reason="DisabledForNow" />
+  <disable_collisions link1="Link0"     link2="J5_J6"        reason="DisabledForNow" />
+  <disable_collisions link1="Link0"     link2="End_Effector" reason="DisabledForNow" />
+  <disable_collisions link1="Link1"     link2="J3_J4"        reason="DisabledForNow" />
+  <disable_collisions link1="Link1"     link2="Link2"        reason="DisabledForNow" />
+  <disable_collisions link1="Link1"     link2="J5_J6"        reason="DisabledForNow" />
+  <disable_collisions link1="Link1"     link2="End_Effector" reason="DisabledForNow" />
+  <disable_collisions link1="J3_J4"     link2="Link2"        reason="DisabledForNow" />
+  <disable_collisions link1="J3_J4"     link2="J5_J6"        reason="DisabledForNow" />
+  <disable_collisions link1="J3_J4"     link2="End_Effector" reason="DisabledForNow" />
+  <disable_collisions link1="Link2"     link2="J5_J6"        reason="DisabledForNow" />
+  <disable_collisions link1="Link2"     link2="End_Effector" reason="DisabledForNow" />
+  <disable_collisions link1="J5_J6"     link2="End_Effector" reason="DisabledForNow" />
+
 </robot>

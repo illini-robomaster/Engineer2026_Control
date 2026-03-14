@@ -31,9 +31,10 @@ moveit_servo:
   halt_all_joints_in_joint_mode: false
   halt_all_joints_in_cartesian_mode: false
 
-  ## Singularity protection — disabled; velocity clamping is handled by the STM32.
-  lower_singularity_threshold: 1000.0
-  hard_stop_singularity_threshold: 1001.0
+  ## Singularity protection — slow down as Jacobian condition number rises.
+  ## These are condition-number thresholds: lower = well-conditioned, higher = near-singular.
+  lower_singularity_threshold: 17.0   # start scaling down velocity
+  hard_stop_singularity_threshold: 30.0  # halt servo output
 
   ## Joint limit margin (rad), extra buffer inside URDF limits
   joint_limit_margin: 0.1
