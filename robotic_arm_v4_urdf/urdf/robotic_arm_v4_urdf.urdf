@@ -95,7 +95,7 @@
       lower="-3.14159"
       upper="3.14159"
       effort="6"
-      velocity="1.2" />
+      velocity="3.0" />
   </joint>
   <link
     name="Link1">
@@ -151,7 +151,7 @@
       lower="-1.5708"
       upper="1.5708"
       effort="40"
-      velocity="1.2" />
+      velocity="3.0" />
   </joint>
   <link
     name="J3_J4">
@@ -207,7 +207,7 @@
       lower="-1.20"
       upper="4.0"
       effort="40"
-      velocity="1.2" />
+      velocity="3.0" />
   </joint>
   <link
     name="Link2">
@@ -263,7 +263,7 @@
       lower="-3.14159"
       upper="3.14159"
       effort="3"
-      velocity="1.5" />
+      velocity="4.0" />
   </joint>
   <link
     name="J5_J6">
@@ -319,7 +319,7 @@
       lower="-1.5708"
       upper="1.5708"
       effort="3"
-      velocity="1.5" />
+      velocity="4.0" />
   </joint>
   <link
     name="End_Effector">
@@ -374,7 +374,7 @@
       lower="-3.14159"
       upper="3.14159"
       effort="0.8"
-      velocity="1.8" />
+      velocity="5.0" />
   </joint>
   <ros2_control name="EngineerArmSystem" type="system">
     <hardware>
