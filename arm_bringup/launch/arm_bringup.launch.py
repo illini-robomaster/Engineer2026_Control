@@ -101,6 +101,8 @@ def _kill_stale_ros_nodes(context):
     python_targets = [
         'uart_bridge_node',
         'socket_teleop_node',
+        'ik_teleop_node',
+        'moveit_teleop_node',
         'joint_monitor_node',
         'homing_node',
         'spawner',
@@ -157,8 +159,9 @@ def generate_launch_description():
     debug_tx        = LaunchConfiguration('debug_tx')
     debug_rx        = LaunchConfiguration('debug_rx')
 
-    # Servo is only needed in the default 'servo' mode
-    use_servo = PythonExpression(["'", teleop_mode, "' != 'ik_direct'"])
+    # servo_node is only needed when teleop_mode=='servo'; ik_direct and moveit use
+    # /arm_controller/joint_trajectory directly, so servo_node is not required.
+    use_servo = PythonExpression(["'", teleop_mode, "' == 'servo'"])
 
     # ── MoveIt2 + ros2_control + servo_node + RViz ───────────────────────────
     moveit_launch = IncludeLaunchDescription(
@@ -215,8 +218,8 @@ def generate_launch_description():
         DeclareLaunchArgument('uart_port',       default_value=''),
         DeclareLaunchArgument('baud_rate',       default_value='115200'),
         DeclareLaunchArgument('use_teleop',      default_value='true'),
-        DeclareLaunchArgument('teleop_mode',     default_value='servo',
-            description='"servo" (default) or "ik_direct" (skips servo_node, uses inline PyKDL IK)'),
+        DeclareLaunchArgument('teleop_mode',     default_value='ik_direct',
+            description='"ik_direct" (default, PyKDL LMA) | "servo" (DLS Jacobian) | "moveit" (OMPL, not for teleop)'),
         DeclareLaunchArgument('socket_host',     default_value='0.0.0.0'),
         DeclareLaunchArgument('socket_port',     default_value='9999'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='true'),

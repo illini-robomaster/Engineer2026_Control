@@ -1,77 +1,56 @@
-socket_teleop_node:
-  ros__parameters:
-    # TCP socket the arm_vision client connects to
-    host: "0.0.0.0"   # bind all interfaces; use "127.0.0.1" for localhost only
-    port: 9999
+################################################################################
+# arm_teleop parameter file
+#
+# Three teleop modes (select with teleop_mode argument in bringup):
+#
+#   ik_direct (DEFAULT)
+#     PyKDL LMA inverse kinematics, seeded from current joints.
+#     Deterministic — always finds the nearest IK solution (minimum joint
+#     motion).  Best for reaching a static or slow-moving target.
+#
+#   servo
+#     DLS Jacobian velocity controller with null-space posture control.
+#     Proportional — tracks a continuously moving target smoothly.
+#     More complex but optimal for fast visual tracking.
+#
+#   moveit
+#     OMPL path planning via MoveGroup action.
+#     Collision-aware but slow (1 s planning budget) and stochastic.
+#     NOT suitable for real-time teleop.  Use for scripted waypoints or
+#     when collision avoidance is required.
+################################################################################
 
-    # TF frame names
-    ee_frame: "End_Effector"
-    base_frame: "base_link"
-
-    # Proportional controller gains (servo sends these as speed commands)
-    kp_linear: 5.0      # m/s per m of position error
-    kp_angular: 4.0     # rad/s per rad of orientation error
-
-    # Clamp output to these max speeds (passed to moveit_servo)
-    max_linear_speed: 1.5     # m/s  (capped further by URDF joint velocity limits in servo)
-    max_angular_speed: 2.0    # rad/s
-
-    # Deadband: suppress commands when pose error is below this threshold
-    deadband_pos_m: 0.008      # 8 mm
-    deadband_rot_rad: 0.05     # ~3 degrees
-
-    # If no message is received for this many seconds, publish zero twist (halt servo)
-    detection_timeout_s: 0.4
-
-    # Whether to also control end-effector orientation from the received quaternion.
-    # false = only position is controlled; orientation stays at whatever MoveIt last set.
-    control_orientation: true
-
-    # ── DLS singularity-robust control ────────────────────────────────────────
-    # Nakamura–Hanafusa SR-inverse: λ ramps from 0 to λ_max as σ_min drops
-    # below dls_sigma_threshold.  Keeps joint velocities bounded through singularity.
-    dls_lambda_max: 0.1        # max damping factor (tune up if arm still jerks)
-    dls_sigma_threshold: 0.05  # σ_min below this activates damping
-
-    # Joint names and per-joint velocity limits (must match URDF)
-    joint_names:
-      - Joint1
-      - Joint2
-      - Joint3
-      - Joint4
-      - Joint5
-      - Joint6
-    joint_velocity_limits: [1.2, 1.2, 1.2, 1.5, 1.5, 1.8]
-
+# ─────────────────────────────────────────────────────────────────────────────
+# ik_teleop_node  (teleop_mode:=ik_direct)
+# ─────────────────────────────────────────────────────────────────────────────
 ik_teleop_node:
   ros__parameters:
-    # TCP socket the arm_vision client connects to (same protocol as socket_teleop_node)
     host: "0.0.0.0"
     port: 9999
 
-    # TF frame names
     base_frame: "base_link"
-    ee_frame: "End_Effector"
+    ee_frame:   "End_Effector"
 
-    # MoveIt planning group for /compute_ik service
-    ik_group_name: "arm"
+    # IK solve + publish rate.  30 Hz is fast enough for visual tracking;
+    # the trajectory duration below is set to match.
+    publish_rate_hz: 30.0
 
-    # Max rate to call IK and publish joint positions (Hz)
-    publish_rate_hz: 10.0
+    # Trajectory time_from_start.  Set to ~2 control periods so the
+    # controller has time to reach each waypoint before the next arrives.
+    traj_duration_s: 0.06   # 60 ms ~= 2x the 30 Hz period
 
-    # Don't re-solve IK if target moved less than this (m)
-    position_deadband_m: 0.005
+    # Suppress IK re-solve when the commanded joints change by less than this.
+    # Prevents micro-jitter from reaching the hardware.
+    joint_deadband_rad: 0.002
 
-    # /compute_ik service timeout (s) — KDL gets this long per attempt × 10 attempts
-    ik_timeout_s: 0.5
-
-    # time_from_start for the single-point JointTrajectory sent to arm_controller
-    traj_duration_s: 0.2
-
-    # Hold position if no TCP message received for this long (s)
+    # Halt if no TCP message received for this long (s).
     detection_timeout_s: 0.4
 
-    # Ordered joint names — must match SRDF group order
+    # Position-only IK (default: false = robust).
+    # When true the node enforces the incoming quaternion — only works if
+    # the target orientation is reachable by the URDF kinematic model.
+    control_orientation: false
+
     joint_names:
       - Joint1
       - Joint2
@@ -80,19 +59,101 @@ ik_teleop_node:
       - Joint5
       - Joint6
 
+# ─────────────────────────────────────────────────────────────────────────────
+# socket_teleop_node  (teleop_mode:=servo)
+# ─────────────────────────────────────────────────────────────────────────────
+socket_teleop_node:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 9999
+
+    ee_frame:   "End_Effector"
+    base_frame: "base_link"
+
+    # Proportional controller gains
+    kp_linear:  15.0   # m/s per m of position error
+    kp_angular:  5.0   # rad/s per rad of orientation error
+
+    # Clamp Cartesian output to these speeds
+    max_linear_speed:  0.6   # m/s
+    max_angular_speed: 1.5   # rad/s
+
+    # Deadband: suppress commands when error is below this
+    deadband_pos_m:   0.010   # 10 mm
+    deadband_rot_rad: 0.05    # ~2.9 degrees
+
+    # Halt if no TCP message received for this long (s)
+    detection_timeout_s: 0.4
+
+    # Enable orientation control.  Set false until camera->robot orientation
+    # frame is calibrated; position-only is more robust.
+    control_orientation: true
+
+    # ── DLS singularity-robust control ────────────────────────────────────
+    # Nakamura-Hanafusa SR-inverse: lambda ramps 0 to lambda_max as sigma_min
+    # drops below dls_sigma_threshold.
+    dls_lambda_max:      0.2
+    dls_sigma_threshold: 0.12
+
+    # ── Null-space posture control ─────────────────────────────────────────
+    # Secondary task: pull joints toward q_preferred without disturbing the
+    # primary Cartesian task.  Keeps elbow up, avoids zero-pose singularity.
+    nullspace_gain: 2.0
+    q_preferred: [0.0, 0.3, 1.5, 0.0, 0.0, 0.0]
+
+    # ── Target smoothing ───────────────────────────────────────────────────
+    # EMA on incoming target pose.  0 = no smoothing.
+    pose_alpha: 0.35
+
+    joint_names:
+      - Joint1
+      - Joint2
+      - Joint3
+      - Joint4
+      - Joint5
+      - Joint6
+    joint_velocity_limits: [3.0, 3.0, 3.0, 4.0, 4.0, 5.0]   # rad/s
+
+# ─────────────────────────────────────────────────────────────────────────────
+# moveit_teleop_node  (teleop_mode:=moveit)
+# ─────────────────────────────────────────────────────────────────────────────
+moveit_teleop_node:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 9999
+
+    base_frame:      "base_link"
+    ee_link:         "End_Effector"
+    move_group_name: "arm"
+
+    detection_timeout_s: 0.4
+    replan_threshold_m:  0.03
+
+    # OMPL planning time budget
+    planning_time_s: 1.0
+
+    velocity_scaling:     0.5
+    acceleration_scaling: 0.3
+
+    pos_tolerance_m:   0.005
+    ori_tolerance_rad: 0.05
+
+    # Position-only planning by default.  Set true only after camera->robot
+    # orientation calibration is validated.
+    control_orientation: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# keyboard_teleop_node  (manual debug, run in a separate terminal)
+# ─────────────────────────────────────────────────────────────────────────────
 keyboard_teleop_node:
   ros__parameters:
     base_frame: "base_link"
-    ee_frame: "End_Effector"
+    ee_frame:   "End_Effector"
 
-    # Linear and angular step sizes for keyboard Cartesian mode
-    linear_speed: 0.08     # m/s
-    angular_speed: 0.3     # rad/s
+    linear_speed:  0.08   # m/s
+    angular_speed: 0.3    # rad/s
+    joint_speed:   0.3    # rad/s
 
-    # Joint jog step size
-    joint_speed: 0.3       # rad/s
-
-    # Joint names (order matches joints 1-6 for key selection)
     joint_names:
       - Joint1
       - Joint2

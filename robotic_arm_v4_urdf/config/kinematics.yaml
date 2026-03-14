@@ -2,15 +2,23 @@ arm:
   # pick_ik: gradient descent + random restarts, much more robust than KDL near
   # singularities and joint limits. Install: sudo apt install ros-humble-pick-ik
   kinematics_solver: pick_ik/PickIkPlugin
-  kinematics_solver_timeout: 0.2
+  kinematics_solver_timeout: 0.5
   kinematics_solver_attempts: 3
-  # Mode: "global" uses random restarts (slower, more reliable for far targets);
-  # "local" is pure gradient descent from seed (fast, good for small deltas in teleop).
-  mode: local
-  stop_optimization_on_valid_solution: true
+
+  # "global" mode: random restarts from any seed.  Required for OMPL goal-tree
+  # sampling — OMPL calls the IK solver with random seeds, and gradient descent
+  # ("local" mode) almost always diverges from a random seed, producing
+  # "Unable to sample any valid states for goal tree".
+  #
+  # NOTE: ik_teleop_node does NOT use this file at all — it calls PyKDL
+  # directly and seeds IK from the current joint state, so it is always
+  # minimum-motion regardless of this setting.
+  mode: global
+
   position_threshold: 0.001       # m — IK accepted when EE within 1 mm of target
   orientation_threshold: 0.01     # rad — ~0.57 deg orientation tolerance
   cost_threshold: 0.001
+
   # KDL fallback (uncomment if pick_ik not installed):
   # kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
   # kinematics_solver_search_resolution: 0.005
