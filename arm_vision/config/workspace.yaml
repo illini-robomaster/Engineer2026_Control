@@ -1,28 +1,47 @@
-# Workspace mapping: cube pose in camera frame → EE target in robot base frame
+# Workspace mapping: cube pose deltas → EE target in robot frame.
 #
 # Formula:
-#   ee_target = ee_origin + R_cam2robot * diag(scale) * (cube_pos - cam_origin)
+#   ee_target = ee_home + R_cam2robot * gain * (cube_pos - cam_origin)
 #
-# Tune these values for your physical setup:
-#   cam_origin  — "neutral" cube position in camera frame (metres) where the
-#                 arm should be at ee_origin.  Roughly: hold the cube ~50 cm
-#                 in front of the camera at image centre.
-#   ee_origin   — desired EE position in base_link frame (metres) at neutral.
-#                 Run 'ros2 topic echo /tf' at the home pose to find real values.
-#   scale       — amplification per axis (camera displacement → robot displacement).
-#                 Increase to make arm movements larger relative to cube movement.
-#   cam_to_robot — 3×3 rotation matrix (row-major) mapping camera axes to robot
-#                  base_link axes.
+# cam_origin — fixed "neutral" cube position in camera frame (metres).
+#              When the cube is here, the arm is at ee_home.
+#              Roughly: hold cube centred in frame, ~30 cm away.
+# ee_home    — EE position in base_link when cube is at cam_origin.
+# gain       — amplification.  2.0 = arm moves 2x further than cube.
 #
-# Default: camera faces the operator, positioned ~1 m in front and 0.5 m above:
-#   camera axes: X=right, Y=down, Z=forward (depth)
-#   robot axes:  X=forward, Y=left, Z=up
-#   → cam_z → -robot_x,  cam_x → robot_y,  cam_y → -robot_z
+# Press H in the preview window to re-home (clutch):
+#   cam_origin resets to current cube position, ee_home to current EE.
+#   Repositions your hand without moving the arm.
+#
+# Camera axes: X=right, Y=down, Z=forward (depth)
+# Robot axes:  X=forward, Y=left, Z=up
 workspace:
-  cam_origin: [0.0, 0.0, 0.20]
-  ee_origin:  [0.426, 0.0, 0.395]
-  scale: [2.0, 2.0, 2.0]
+  cam_origin: [0.0, 0.0, 0.30]
+  ee_home:    [0.426, 0.0, 0.395]
+  gain:       [2.0, 2.0, 2.0]
+
   cam_to_robot:
     [ 0.0,  0.0,  -1.0,
-     1.0,  0.0,  0.0,
-      0.0, -1.0,  0.0]
+      1.0,  0.0,   0.0,
+      0.0, -1.0,   0.0]
+
+  # ── Safety limits ────────────────────────────────────────────────────────
+  # Rectangular box (floor/ceiling/self-collision):
+  pos_min: [0.05, -0.50, -0.40]
+  pos_max: [0.82,  0.50,  0.90]
+
+  # Spherical reach from base_link origin (coupled axis limits):
+  reach_max: 0.82
+  reach_min: 0.08
+
+  # ── Kalman filter (pose_filter.py) ───────────────────────────────────────
+  filter:
+    process_noise: 0.06
+    meas_noise:    0.004
+    max_vel:       0.5
+    max_coast_s:   0.5
+
+  # ── Orientation ──────────────────────────────────────────────────────────
+  # EE quaternion at home pose.  Orientation deltas applied relative to this.
+  # Measure: ros2 run tf2_ros tf2_echo base_link End_Effector
+  ee_neutral_quat: [0.0, 0.0, 0.0, 1.0]

@@ -113,7 +113,7 @@ class UartBridgeNode(Node):
         self._port      = p('port', '')
         self._baud      = p('baud_rate', 115200)
         self._joints    = p('joint_names', ['Joint1','Joint2','Joint3','Joint4','Joint5','Joint6'])
-        self._rate      = p('send_rate_hz', 20.0)
+        self._rate      = p('send_rate_hz', 200.0)
         self._cmd_to    = p('command_timeout_s', 0.5)
         self._override  = p('override_joint_states', False)
         self._debug_rx  = p('debug_rx', False)
@@ -133,6 +133,12 @@ class UartBridgeNode(Node):
         self._traj_end_t  = 0.0   # monotonic time of last trajectory completion
         self._running     = True
         self._tx_count    = 0      # total TX frames sent (for diagnostics)
+
+        # Servo-path interpolation state (used by TX loop, written by _servo_cb)
+        self._servo_from: Optional[dict] = None
+        self._servo_to:   Optional[dict] = None
+        self._servo_t0:   float = 0.0
+        self._servo_dur:  float = 0.0
 
         self._real_pub = self.create_publisher(JointState, '/real_joint_states', 10)
         if self._override:
@@ -188,8 +194,19 @@ class UartBridgeNode(Node):
             # has time to converge.
             if time.monotonic() - self._traj_end_t < self._servo_hold:
                 return
-            self._cmd   = dict(zip(msg.joint_names, pt.positions))
-            self._cmd_t = time.monotonic()
+            dur = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+            if dur > 0.0 and self._cmd is not None:
+                # Interpolate from current cmd to new target over time_from_start.
+                # TX loop reads _servo_from/_to and updates _cmd each tick.
+                self._servo_from = dict(self._cmd)
+                self._servo_to   = dict(zip(msg.joint_names, pt.positions))
+                self._servo_t0   = time.monotonic()
+                self._servo_dur  = dur
+            else:
+                # No duration info or cold start — snap directly.
+                self._servo_from = None
+                self._cmd   = dict(zip(msg.joint_names, pt.positions))
+                self._cmd_t = time.monotonic()
 
     # ---- action server ------------------------------------------------------
 
@@ -258,6 +275,19 @@ class UartBridgeNode(Node):
             # rather than bursting — the MCU only needs the latest value.
             if next_t < time.monotonic():
                 next_t = time.monotonic() + tick
+
+            # ── advance servo interpolation if active ─────────────────
+            with self._lock:
+                if self._servo_from is not None and self._servo_to is not None:
+                    elapsed = time.monotonic() - self._servo_t0
+                    alpha   = min(1.0, elapsed / self._servo_dur) if self._servo_dur > 0 else 1.0
+                    interp  = {k: (1.0 - alpha) * self._servo_from.get(k, 0.0)
+                                  +        alpha  * self._servo_to.get(k, 0.0)
+                               for k in self._servo_to}
+                    self._cmd   = interp
+                    self._cmd_t = time.monotonic()
+                    if alpha >= 1.0:
+                        self._servo_from = None   # interpolation complete
 
             # ── snapshot shared state under one lock ──────────────────
             with self._lock:

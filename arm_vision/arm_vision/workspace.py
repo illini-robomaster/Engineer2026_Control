@@ -1,18 +1,26 @@
 """
 Workspace mapping: cube pose in camera frame → EE target in robot base frame.
 
-The affine mapping is:
-  ee_target_pos = ee_origin + R_cam2robot * diag(scale) * (cube_pos - cam_origin)
+Position mapping:
+  ee_target = ee_home + R_cam2robot * gain * (cube_pos - cam_origin)
 
-For orientation (optional):
-  ee_target_quat computed by rotating the cube's orientation through R_cam2robot.
+cam_origin is a fixed reference point in camera space (e.g. 30 cm in front
+of the camera, at image centre).  When the cube is at cam_origin, the arm
+is at ee_home.  Moving the cube away from cam_origin moves the arm by
+gain × the displacement, rotated into the robot frame.
+
+Press H to re-home (clutch): cam_origin resets to the current cube position
+and ee_home resets to the current EE position, so you can reposition your
+hand without moving the arm.
+
+Orientation uses a delta approach:
+  dR = R_cube_current * inv(R_cube_at_origin)   (in robot frame)
+  ee_ori = dR * ee_neutral_ori
 
 Config is loaded from config/workspace.yaml.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import numpy as np
 import yaml
@@ -20,67 +28,134 @@ from scipy.spatial.transform import Rotation
 
 
 class WorkspaceMapper:
-    """
-    Maps a cube centre pose (camera frame) to a desired EE pose (robot frame).
-
-    Parameters
-    ----------
-    config_path : path to workspace.yaml
-    """
+    """Cube-delta teleop mapper with fixed camera reference point."""
 
     def __init__(self, config_path: str = 'config/workspace.yaml'):
         with open(config_path) as f:
             cfg = yaml.safe_load(f)['workspace']
 
-        self._cam_origin = np.array(cfg['cam_origin'], dtype=float)
-        self._ee_origin  = np.array(cfg['ee_origin'],  dtype=float)
-        self._scale      = np.array(cfg['scale'],       dtype=float)
+        self._gain = np.array(cfg.get('gain', [2.0, 2.0, 2.0]), dtype=float)
 
         flat = cfg['cam_to_robot']
         if isinstance(flat, list):
             flat = [float(v) for v in flat]
         self._R = np.array(flat, dtype=float).reshape(3, 3)
 
-    def map_position(self, cube_pos_cam: np.ndarray) -> np.ndarray:
+        # Fixed reference: when cube is here, arm is at ee_home
+        self._cam_origin = np.array(cfg['cam_origin'], dtype=float)
+        self._ee_home = np.array(cfg.get('ee_home', [0.426, 0.0, 0.395]), dtype=float)
+
+        # Safety limits
+        self._pos_min = np.array(cfg.get('pos_min', [-1.0, -1.0, -1.0]), dtype=float)
+        self._pos_max = np.array(cfg.get('pos_max', [ 1.0,  1.0,  1.0]), dtype=float)
+        self._reach_max = float(cfg.get('reach_max', 0.82))
+        self._reach_min = float(cfg.get('reach_min', 0.08))
+
+        # Baseline distance for reach_frac normalisation
+        self._dist_home = float(np.linalg.norm(self._ee_home))
+
+        # Orientation
+        self._ee_neutral_rot = Rotation.from_quat(
+            np.array(cfg.get('ee_neutral_quat', [0.0, 0.0, 0.0, 1.0]), dtype=float))
+
+        # Cube orientation at cam_origin (robot frame) — set on first detection
+        # or manually via calibration.  Until set, orientation mapping returns neutral.
+        self._cube_origin_rot_robot: Rotation | None = None
+
+    # ── Re-home (clutch) ───────────────────────────────────────────────────
+
+    def re_home(self, cube_pos: np.ndarray, cube_quat: np.ndarray | None,
+                ee_pos: np.ndarray):
+        """Clutch: reset reference so current cube pos → current EE pos."""
+        self._cam_origin = cube_pos.copy()
+        self._ee_home = ee_pos.copy()
+        self._dist_home = float(np.linalg.norm(ee_pos))
+        if cube_quat is not None:
+            R_cam = Rotation.from_quat(cube_quat)
+            self._cube_origin_rot_robot = Rotation.from_matrix(
+                self._R @ R_cam.as_matrix() @ self._R.T)
+
+    # ── Mapping ────────────────────────────────────────────────────────────
+
+    def map_position(self, cube_pos: np.ndarray) -> tuple[np.ndarray, float]:
+        """Map cube position to EE target.
+
+        Returns (ee_pos, reach_frac).  reach_frac is 0 at ee_home, 1.0 at limit.
         """
-        Map cube centre position in camera frame to desired EE position in robot frame.
+        delta_cam = cube_pos - self._cam_origin
+        delta_robot = self._R @ (self._gain * delta_cam)
+        pos = self._ee_home + delta_robot
 
-        Parameters
-        ----------
-        cube_pos_cam : np.ndarray shape (3,)
+        # Spherical reach clamp
+        dist = float(np.linalg.norm(pos))
+        outward_budget = max(self._reach_max - self._dist_home, 0.01)
+        reach_frac = max(0.0, dist - self._dist_home) / outward_budget
 
-        Returns
-        -------
-        ee_target : np.ndarray shape (3,)
-        """
-        delta_cam   = cube_pos_cam - self._cam_origin
-        delta_robot = self._R @ (self._scale * delta_cam)
-        return self._ee_origin + delta_robot
+        if dist > self._reach_max:
+            pos = pos * (self._reach_max / dist)
+        elif dist < self._reach_min and dist > 1e-6:
+            pos = pos * (self._reach_min / dist)
 
-    def map_orientation(self, cube_quat_cam: np.ndarray) -> np.ndarray:
-        """
-        Map cube orientation (camera frame) to desired EE orientation (robot frame).
+        pos = np.clip(pos, self._pos_min, self._pos_max)
+        return pos, reach_frac
 
-        Applies the cam→robot rotation: R_robot = R_cam2robot * R_cube_cam * R_cam2robot^T
+    def map_orientation(self, cube_quat: np.ndarray) -> np.ndarray:
+        """Map cube orientation delta to EE target quaternion [x,y,z,w]."""
+        # Record first orientation as the origin reference
+        if self._cube_origin_rot_robot is None:
+            R_cam = Rotation.from_quat(cube_quat)
+            self._cube_origin_rot_robot = Rotation.from_matrix(
+                self._R @ R_cam.as_matrix() @ self._R.T)
+            return self._ee_neutral_rot.as_quat()
 
-        Parameters
-        ----------
-        cube_quat_cam : np.ndarray [x, y, z, w]
+        # Current cube orientation in robot frame
+        R_cam = Rotation.from_quat(cube_quat)
+        R_cube_robot = Rotation.from_matrix(
+            self._R @ R_cam.as_matrix() @ self._R.T)
 
-        Returns
-        -------
-        ee_quat : np.ndarray [x, y, z, w]
-        """
-        R_cube = Rotation.from_quat(cube_quat_cam).as_matrix()
-        R_ee   = self._R @ R_cube @ self._R.T
-        return Rotation.from_matrix(R_ee).as_quat()
+        # Delta from origin
+        dR = R_cube_robot * self._cube_origin_rot_robot.inv()
+        return (dR * self._ee_neutral_rot).as_quat()
 
     def map(
         self,
-        cube_pos_cam:  np.ndarray,
-        cube_quat_cam: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        cube_pos: np.ndarray,
+        cube_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Returns (ee_pos, ee_quat, reach_frac) in robot base frame."""
+        pos, reach_frac = self.map_position(cube_pos)
+        return pos, self.map_orientation(cube_quat), reach_frac
+
+    # ── Safe zone (for camera overlay) ─────────────────────────────────────
+
+    def safe_zone_cam(self, cube_pos: np.ndarray, cam_z: float
+                      ) -> tuple[float, float, float, float]:
+        """Compute how far the cube can move before hitting limits.
+
+        Returns (cam_x_min, cam_x_max, cam_y_min, cam_y_max) in camera metres.
         """
-        Convenience wrapper.  Returns (ee_pos, ee_quat) both in robot frame.
-        """
-        return self.map_position(cube_pos_cam), self.map_orientation(cube_quat_cam)
+        ee_pos, _ = self.map_position(cube_pos)
+
+        # Room in robot frame before hitting box limits
+        room_lo = ee_pos - self._pos_min
+        room_hi = self._pos_max - ee_pos
+
+        # Tighten by sphere
+        dist = float(np.linalg.norm(ee_pos))
+        if dist > 0.01:
+            sphere_room = max(0.0, self._reach_max - dist)
+            for i in range(3):
+                room_lo[i] = min(room_lo[i], sphere_room + abs(ee_pos[i]))
+                room_hi[i] = min(room_hi[i], sphere_room + abs(ee_pos[i]))
+
+        # Inverse-map to camera coordinates.
+        # R = [[0,0,-1],[1,0,0],[0,-1,0]] → R.T maps:
+        #   cam_x = robot_y / gain[0]
+        #   cam_y = -robot_z / gain[1]
+        g = self._gain
+        cam_x_lo = cube_pos[0] - room_lo[1] / g[0]
+        cam_x_hi = cube_pos[0] + room_hi[1] / g[0]
+        cam_y_lo = cube_pos[1] - room_hi[2] / g[1]  # robot_z up → cam_y up (negative)
+        cam_y_hi = cube_pos[1] + room_lo[2] / g[1]
+
+        return float(cam_x_lo), float(cam_x_hi), float(cam_y_lo), float(cam_y_hi)

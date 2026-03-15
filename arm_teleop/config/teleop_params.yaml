@@ -31,25 +31,67 @@ ik_teleop_node:
     base_frame: "base_link"
     ee_frame:   "End_Effector"
 
-    # IK solve + publish rate.  30 Hz is fast enough for visual tracking;
-    # the trajectory duration below is set to match.
-    publish_rate_hz: 30.0
+    # IK solve + publish rate.  60 Hz halves the worst-case stale-pose window
+    # (33 ms → 16 ms).  IK solves in <2 ms so the 16 ms budget is ample.
+    # Camera is still 30 fps, but the faster tick reduces wait after TCP arrival.
+    publish_rate_hz: 60.0
 
-    # Trajectory time_from_start.  Set to ~2 control periods so the
-    # controller has time to reach each waypoint before the next arrives.
-    traj_duration_s: 0.06   # 60 ms ~= 2x the 30 Hz period
+    # Trajectory time_from_start.  One 60 Hz period — the arm controller
+    # completes each waypoint before the next arrives, making motion feel live.
+    # If the arm faults due to velocity limits, raise in 5 ms steps (0.038, 0.043…).
+    traj_duration_s: 0.033   # 33 ms ~= 1x the 60 Hz period
 
     # Suppress IK re-solve when the commanded joints change by less than this.
     # Prevents micro-jitter from reaching the hardware.
     joint_deadband_rad: 0.002
 
+    # Reject IK solutions where any single joint would move more than this from
+    # the current hardware position.  Catches configuration flips (e.g. J4 ±180°
+    # wrist singularity) that are geometrically valid but physically undesirable.
+    # 0.8 rad (≈46°) is tight enough to block J4 flips while still allowing
+    # normal-speed motion.  The velocity limiter smooths the rest.
+    # Set 0.0 to disable.
+    max_joint_jump_rad: 0.8
+
+    # Joint-space velocity limit (rad/s per joint).  When IK re-acquires a
+    # solution after traversing an unreachable zone, the arm ramps smoothly
+    # to the new target instead of snapping.  At 60 Hz, 4.0 rad/s allows
+    # 0.067 rad/tick — fast enough for normal tracking, but catches violent
+    # snaps (>230°/s).  Previous 2.0 rad/s throttled 33-75% of normal ticks.
+    # Set 0.0 to disable.
+    max_joint_vel_rad_s: 4.0
+
     # Halt if no TCP message received for this long (s).
     detection_timeout_s: 0.4
 
-    # Position-only IK (default: false = robust).
-    # When true the node enforces the incoming quaternion — only works if
-    # the target orientation is reachable by the URDF kinematic model.
+    # Set true to enforce the incoming quaternion (full 6D pose IK).
+    # Only use after camera->robot orientation calibration is validated.
+    # Position-only (false) is more robust for initial deployment.
     control_orientation: false
+
+    # Weight applied to the orientation error rows in 6D mode.
+    # 1.0 = equal weighting.  Increase (e.g. 2.0) if orientation lags behind
+    # position; decrease (e.g. 0.5) if orientation causes instability.
+    ori_weight: 1.0
+
+    # [DEPRECATED — now unused]  J4 flip prevention is handled by the
+    # max_joint_jump_rad guard in the control loop, not inside the solver.
+    # Kept at 0.0 for parameter compatibility.
+    ik_seed_regularization: 0.0
+
+    # Static orientation offset applied to incoming target quaternion (right-multiplied).
+    # Compensates for the mismatch between the teleop's zero orientation and the
+    # URDF End_Effector frame (Joint6 has rpy="1.5707 0 1.5707" baked in).
+    # Observed: EE is -90° around X at zero teleop RPY → offset = +90° around X.
+    # Adjust sign/axis here if the residual is different on your hardware.
+    ee_ori_offset_roll:  1.5707963   # +90° around X  (Rx correction)
+    ee_ori_offset_pitch: 0.0
+    ee_ori_offset_yaw:   0.0
+
+    # Extra random seeds tried after deterministic seeds fail.
+    # Higher values improve coverage near workspace edges at the cost of ~7 ms
+    # worst-case per control tick (still well within the 16 ms budget at 60 Hz).
+    n_random_seeds: 15
 
     joint_names:
       - Joint1

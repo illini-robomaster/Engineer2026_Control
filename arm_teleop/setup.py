@@ -26,6 +26,7 @@ setup(
             'keyboard_teleop_node = arm_teleop.keyboard_teleop_node:main',
             'joint_monitor_node = arm_teleop.joint_monitor_node:main',
             'ik_teleop_node = arm_teleop.ik_teleop_node:main',
+            'moveit_teleop_node = arm_teleop.moveit_teleop_node:main',
         ],
     },
 )

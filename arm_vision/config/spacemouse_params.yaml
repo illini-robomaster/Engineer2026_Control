@@ -1,0 +1,32 @@
+spacemouse:
+  # Starting EE position (m) in base_link — matches workspace.yaml ee_origin
+  init_pos: [0.426, 0.0, 0.395]
+  init_quat: [0.0, 0.0, 0.0, 1.0] # [x, y, z, w]
+
+  # Speed at full SpaceMouse deflection (±1.0)
+  linear_speed: 0.15 # m/s
+  angular_speed: 0.5 # rad/s
+
+  # Ignore inputs below this magnitude (eliminates drift)
+  deadband: 0.05
+
+  # Control loop rate (Hz) — SpaceMouse is polled at this rate
+  poll_hz: 100
+
+  # Workspace safety limits in base_link (metres)
+  pos_min: [0.10, -0.40, 0.10]
+  pos_max: [0.70, 0.40, 0.60]
+
+  # 3×3 matrix (row-major, flat): maps [sm.x, sm.y, sm.z] → robot [X, Y, Z]
+  # Default: SpaceMouse on desk facing arm
+  #   push cap forward (+sm.y) → arm goes forward  (+robot_X)
+  #   push cap right   (+sm.x) → arm goes right     (-robot_Y)
+  #   push cap up      (+sm.z) → arm goes up         (+robot_Z)
+  lin_map: [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+  # 3×3 matrix (row-major, flat): maps [sm.roll, sm.pitch, sm.yaw] → robot [Rx, Ry, Rz]
+  ang_map: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0]
+
+  # Set true to also send EE orientation (requires a measured ee_neutral_quat
+  # in the workspace config and a corresponding cube_neutral_quat)
+  control_orientation: true

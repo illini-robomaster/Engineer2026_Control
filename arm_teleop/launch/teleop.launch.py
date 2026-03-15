@@ -36,9 +36,11 @@ def generate_launch_description():
     )
     robot_description = {'robot_description': urdf_path.read_text()}
 
-    host        = LaunchConfiguration('host')
-    port        = LaunchConfiguration('port')
-    teleop_mode = LaunchConfiguration('teleop_mode')
+    host            = LaunchConfiguration('host')
+    port            = LaunchConfiguration('port')
+    teleop_mode     = LaunchConfiguration('teleop_mode')
+    ctrl_ori        = LaunchConfiguration('control_orientation')
+    ori_weight      = LaunchConfiguration('ori_weight')
 
     is_servo  = PythonExpression(["'", teleop_mode, "' == 'servo'"])
     is_ik     = PythonExpression(["'", teleop_mode, "' == 'ik_direct'"])
@@ -65,7 +67,9 @@ def generate_launch_description():
         parameters=[
             teleop_params,
             robot_description,
-            {'host': host, 'port': port},
+            {'host': host, 'port': port,
+             'control_orientation': ctrl_ori,
+             'ori_weight': ori_weight},
         ],
         condition=IfCondition(is_ik),
     )
@@ -91,6 +95,10 @@ def generate_launch_description():
                               description='TCP bind port for pose socket'),
         DeclareLaunchArgument('teleop_mode', default_value='ik_direct',
                               description='"ik_direct" (default) | "servo" | "moveit"'),
+        DeclareLaunchArgument('control_orientation', default_value='false',
+                              description='ik_direct: true=6D pose IK, false=position-only'),
+        DeclareLaunchArgument('ori_weight', default_value='1.0',
+                              description='ik_direct 6D mode: orientation error weight'),
         socket_teleop,
         ik_teleop,
         moveit_teleop,

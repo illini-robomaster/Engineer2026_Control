@@ -62,12 +62,11 @@ uart_bridge_node:
     debug_rx: false
 
     # Rate at which commands are sent to the STM32 (Hz).
-    # Keep this at or below ~20 Hz. At 50 Hz on a non-RT OS, ROS2 timer callbacks
-    # can fire in bursts, sending frames back-to-back with no gap.  A typical STM32
-    # DMA receive buffer (~64-256 bytes ≈ 4 frames at 51 bytes/frame) overflows,
-    # producing corrupted frames with garbage bytes mid-payload.
-    # 20 Hz gives 50 ms between frames — plenty of drain time for the MCU.
-    send_rate_hz: 20.0
+    # 200 Hz (5 ms period) matches the MCU ArmUpdate control loop so each tick
+    # receives a fresh waypoint. The TX loop uses a dedicated thread with
+    # time.monotonic() cadence — no ROS timer burst issues.
+    # Bandwidth: 16 bytes × 200 Hz × 10 bits = 32 kbaud out of 115200 (~28%).
+    send_rate_hz: 200.0
 
     # Stale-command timeout: stop sending if no new trajectory received in this time.
     command_timeout_s: 0.5

@@ -31,10 +31,13 @@ Parameters:
   deadband_rot_rad    : rotation deadband rad    (default: 0.05)
   detection_timeout_s : halt if no msg for this long (default: 0.4)
   control_orientation : also control EE orientation  (default: True)
-  dls_lambda_max      : max DLS damping factor   (default: 0.1)
-  dls_sigma_threshold : σ_min below which damping activates (default: 0.05)
+  dls_lambda_max      : max DLS damping factor   (default: 0.2)
+  dls_sigma_threshold : σ_min below which damping activates (default: 0.12)
   joint_names         : ordered joint names      (default: Joint1…Joint6)
-  joint_velocity_limits : per-joint velocity caps rad/s (default: [1.2,1.2,1.2,1.5,1.5,1.8])
+  joint_velocity_limits : per-joint velocity caps rad/s (default: [3.0,3.0,3.0,4.0,4.0,5.0])
+  nullspace_gain      : secondary posture task gain rad/s/rad (default: 2.0)
+  q_preferred         : preferred joint angles rad (default: [0,0.3,1.5,0,0,0])
+  pose_alpha          : EMA smoothing factor for incoming target (default: 0.35)
   robot_description   : URDF XML string for KDL chain (passed by launch file)
 """
 
@@ -181,12 +184,15 @@ class SocketTeleopNode(Node):
         self.declare_parameter('deadband_rot_rad', 0.05)
         self.declare_parameter('detection_timeout_s', 0.4)
         self.declare_parameter('control_orientation', True)
-        self.declare_parameter('dls_lambda_max', 0.1)
-        self.declare_parameter('dls_sigma_threshold', 0.05)
+        self.declare_parameter('dls_lambda_max', 0.2)
+        self.declare_parameter('dls_sigma_threshold', 0.12)
         self.declare_parameter('joint_names',
             ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6'])
         self.declare_parameter('joint_velocity_limits',
-            [1.2, 1.2, 1.2, 1.5, 1.5, 1.8])
+            [3.0, 3.0, 3.0, 4.0, 4.0, 5.0])
+        self.declare_parameter('nullspace_gain', 2.0)
+        self.declare_parameter('q_preferred', [0.0, 0.3, 1.5, 0.0, 0.0, 0.0])
+        self.declare_parameter('pose_alpha', 0.35)
         self.declare_parameter('robot_description', '')
 
         self._host        = self.get_parameter('host').value
@@ -201,11 +207,14 @@ class SocketTeleopNode(Node):
         self._db_rot      = self.get_parameter('deadband_rot_rad').value
         self._timeout     = self.get_parameter('detection_timeout_s').value
         self._ctrl_orient = self.get_parameter('control_orientation').value
-        self._dls_lam_max = self.get_parameter('dls_lambda_max').value
-        self._dls_sigma   = self.get_parameter('dls_sigma_threshold').value
-        self._joint_names = list(self.get_parameter('joint_names').value)
-        self._joint_vlims = list(self.get_parameter('joint_velocity_limits').value)
-        robot_desc        = self.get_parameter('robot_description').value
+        self._dls_lam_max  = self.get_parameter('dls_lambda_max').value
+        self._dls_sigma    = self.get_parameter('dls_sigma_threshold').value
+        self._joint_names  = list(self.get_parameter('joint_names').value)
+        self._joint_vlims  = list(self.get_parameter('joint_velocity_limits').value)
+        self._null_gain    = self.get_parameter('nullspace_gain').value
+        self._q_preferred  = np.array(self.get_parameter('q_preferred').value, dtype=float)
+        self._pose_alpha   = float(self.get_parameter('pose_alpha').value)
+        robot_desc         = self.get_parameter('robot_description').value
 
         # ── TF ────────────────────────────────────────────────────────────────
         self._tf_buf      = tf2_ros.Buffer()
@@ -220,6 +229,9 @@ class SocketTeleopNode(Node):
         self._lock              = threading.Lock()
         self._target_pos: Optional[np.ndarray] = None
         self._target_quat: Optional[np.ndarray] = None
+        # EMA-smoothed targets (updated only in control loop to avoid threading issues)
+        self._smooth_pos: Optional[np.ndarray] = None
+        self._smooth_quat: Optional[np.ndarray] = None
         self._last_recv_time: float = 0.0
         self._joint_pos: dict = {}           # name → rad, updated from /joint_states
 
@@ -284,9 +296,24 @@ class SocketTeleopNode(Node):
     # ── Socket server ─────────────────────────────────────────────────────────
 
     def _socket_server(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind((self._host, self._port))
+        for attempt in range(10):
+            try:
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind((self._host, self._port))
+                break
+            except OSError as e:
+                srv.close()
+                self.get_logger().warn(
+                    f'Socket bind failed ({e}) — retry {attempt+1}/10 in 1 s')
+                time.sleep(1.0)
+        else:
+            self.get_logger().error(
+                f'Could not bind {self._host}:{self._port} after 10 attempts — '
+                f'kill any process holding port {self._port} and restart.')
+            return
+
+        with srv:
             srv.listen(1)
             srv.settimeout(1.0)
             self.get_logger().info(
@@ -318,8 +345,11 @@ class SocketTeleopNode(Node):
                     self._parse_message(line.strip())
         self.get_logger().info(f'arm_vision client disconnected: {addr}')
         with self._lock:
-            self._target_pos = None
+            self._target_pos  = None
             self._target_quat = None
+        # Reset EMA so stale smoothed pose doesn't bleed into next connection
+        self._smooth_pos  = None
+        self._smooth_quat = None
 
     def _parse_message(self, line: str):
         if not line:
@@ -353,47 +383,46 @@ class SocketTeleopNode(Node):
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             self.get_logger().warn(f'Bad socket message: {exc}  raw={line[:80]}')
 
-    # ── DLS Jacobian inverse ───────────────────────────────────────────────────
+    # ── DLS Jacobian inverse with null-space posture control ──────────────────
 
     def _compute_dls(self, linear: np.ndarray, angular: np.ndarray,
                      joint_pos: dict) -> Optional[np.ndarray]:
-        """Compute joint velocities via Singularity-Robust DLS inverse.
+        """Compute joint velocities via Singularity-Robust DLS inverse with
+        null-space posture control.
 
-        Standard pseudoinverse blows up near singular configurations, sending
-        huge joint velocity spikes to the arm controller (→ e-stop).  DLS adds
-        an adaptive damping term λ² that keeps joint velocities bounded even AT
-        an exact singularity.
+        Primary task: track Cartesian target (position + optional orientation).
+        Secondary task: push joints toward q_preferred in the DLS null-space.
+          This keeps the arm in a dexterous posture and actively moves it away
+          from straight-arm/zero configurations where singularity occurs.
 
-        Away from singularity: λ ≈ 0, so DLS ≈ pseudoinverse (no accuracy loss).
-        Near singularity (σ_min < dls_sigma_threshold): λ grows, accuracy is
-        sacrificed but the arm keeps moving smoothly in available directions.
-
-        Uses the Nakamura–Hanafusa (1986) SR-inverse:
-            q̇ = Jᵀ (J Jᵀ + λ²I)⁻¹ v
-        with λ = λ_max · (1 − σ_min/σ_thresh)  when σ_min < σ_thresh.
+        DLS (Nakamura–Hanafusa 1986):
+            q̇_primary = Jᵀ (J Jᵀ + λ²I)⁻¹ v
+            q̇ = q̇_primary + (I − J⁺J) · k · (q_pref − q)
+        λ ramps from 0 → λ_max as σ_min drops below σ_thresh.
         """
         if self._jac_solver is None:
             return None
 
         n = len(self._joint_names)
-        q = PyKDL.JntArray(n)
-        for i, name in enumerate(self._joint_names):
-            q[i] = joint_pos.get(name, 0.0)
+        q_arr = np.array([joint_pos.get(name, 0.0) for name in self._joint_names])
+        q_kdl = PyKDL.JntArray(n)
+        for i, v in enumerate(q_arr):
+            q_kdl[i] = float(v)
 
         jac_kdl = PyKDL.Jacobian(n)
-        self._jac_solver.JntToJac(q, jac_kdl)
+        self._jac_solver.JntToJac(q_kdl, jac_kdl)
         J = np.array([[jac_kdl[i, j] for j in range(n)] for i in range(6)])
 
         if self._ctrl_orient:
-            J_use = J                               # 6×n
-            v     = np.concatenate([linear, angular])  # 6D
+            J_use = J                                    # 6×n
+            v_cart = np.concatenate([linear, angular])   # 6D
         else:
-            J_use = J[:3, :]                        # 3×n  (position-only)
-            v     = linear                          # 3D
+            J_use = J[:3, :]                             # 3×n  (position-only)
+            v_cart = linear                              # 3D
 
         m = J_use.shape[0]
 
-        # Adaptive damping: λ ramps from 0 → λ_max as σ_min drops below σ_thresh
+        # Adaptive damping: λ ramps 0 → λ_max as σ_min drops below σ_thresh
         svals     = np.linalg.svd(J_use, compute_uv=False)
         sigma_min = float(svals[-1])
         if sigma_min < self._dls_sigma:
@@ -402,10 +431,20 @@ class SocketTeleopNode(Node):
         else:
             lam_sq = 0.0
 
-        JJT   = J_use @ J_use.T
-        q_dot = J_use.T @ np.linalg.solve(JJT + lam_sq * np.eye(m), v)
+        JJT        = J_use @ J_use.T
+        JJT_inv    = np.linalg.solve(JJT + lam_sq * np.eye(m), np.eye(m))
+        J_dls_inv  = J_use.T @ JJT_inv          # DLS pseudoinverse n×m
+        q_dot      = J_dls_inv @ v_cart         # primary task
 
-        # Hard clip to per-joint velocity limits (URDF values)
+        # Null-space posture control: (I − J⁺J) · k · (q_pref − q)
+        # Projects posture correction into the null-space of the Jacobian
+        # so it does not disturb the primary Cartesian task.
+        q_pref_clipped = np.clip(self._q_preferred, -np.pi, np.pi)
+        posture_vel    = self._null_gain * (q_pref_clipped - q_arr)
+        N              = np.eye(n) - J_dls_inv @ J_use   # null-space projector
+        q_dot         += N @ posture_vel
+
+        # Hard clip to per-joint velocity limits
         for i, lim in enumerate(self._joint_vlims):
             q_dot[i] = float(np.clip(q_dot[i], -lim, lim))
 
@@ -415,14 +454,31 @@ class SocketTeleopNode(Node):
 
     def _control_loop(self):
         with self._lock:
-            target_pos  = self._target_pos
-            target_quat = self._target_quat
-            age         = time.monotonic() - self._last_recv_time
-            joint_pos   = dict(self._joint_pos)
+            raw_pos   = self._target_pos
+            raw_quat  = self._target_quat
+            age       = time.monotonic() - self._last_recv_time
+            joint_pos = dict(self._joint_pos)
 
-        if target_pos is None or age > self._timeout:
+        if raw_pos is None or age > self._timeout:
             self._publish_zero()
             return
+
+        # ── EMA smoothing on incoming target pose ─────────────────────────────
+        a = self._pose_alpha
+        if self._smooth_pos is None:
+            self._smooth_pos  = raw_pos.copy()
+            self._smooth_quat = raw_quat.copy()
+        else:
+            self._smooth_pos = a * self._smooth_pos + (1.0 - a) * raw_pos
+            # Slerp-style quaternion EMA: flip sign if dot < 0 to take short path
+            if np.dot(self._smooth_quat, raw_quat) < 0.0:
+                raw_quat = -raw_quat
+            q_blend = a * self._smooth_quat + (1.0 - a) * raw_quat
+            n = np.linalg.norm(q_blend)
+            self._smooth_quat = q_blend / n if n > 1e-6 else self._smooth_quat
+
+        target_pos  = self._smooth_pos
+        target_quat = self._smooth_quat
 
         # Lookup current EE pose
         try:
@@ -459,6 +515,15 @@ class SocketTeleopNode(Node):
                 spd = float(np.linalg.norm(angular))
                 if spd > self._max_ang:
                     angular *= self._max_ang / spd
+
+        # ── At target: hold position — skip nullspace drift ───────────────────
+        # When both position and orientation errors are within deadband, hold
+        # the current joint positions exactly.  Running DLS here would cause
+        # the null-space posture term to nudge joints, shifting the EE just
+        # outside the deadband and creating a sustained oscillation loop.
+        if np.linalg.norm(linear) == 0.0 and np.linalg.norm(angular) == 0.0:
+            self._publish_zero()
+            return
 
         # ── DLS joint velocity control ─────────────────────────────────────────
         q_dot = self._compute_dls(linear, angular, joint_pos)

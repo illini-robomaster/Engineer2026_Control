@@ -110,7 +110,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_servo",       default_value="true",
                 description="false skips servo_node (use with teleop_mode:=ik_direct)"),
             control_launch,
-            TimerAction(period=2.0, actions=[move_group_node]),
+            TimerAction(period=8.0, actions=[move_group_node]),
             TimerAction(period=4.0, actions=[Node(
                 package="moveit_servo",
                 executable="servo_node_main",
