@@ -2,7 +2,7 @@
 AprilTag world-map calibration — multi-tag relative pose method.
 
 Usage:
-  python main.py calibrate-cube [--device 0] [--tag-family tag36h11]
+  python main.py calibrate-cube [--device 0] [--tag-family tag25h9]
                                 [--tag-size 0.032]
                                 [--camera-cal data/camera_calibration.yaml]
                                 [--output data/cube_config.yaml]
@@ -18,7 +18,7 @@ Procedure:
 
 Output (data/cube_config.yaml):
   tag_size:         AprilTag black-square side in metres
-  tag_family:       tag36h11
+  tag_family:       tag25h9
   reference_tag_id: 0
   tags:
     - id:               tag id
@@ -96,7 +96,7 @@ def _build_pose_map(
 
 def run(
     device: int = 0,
-    tag_family: str = 'tag36h11',
+    tag_family: str = 'tag25h9',
     tag_size: float = 0.032,
     camera_cal: str = 'data/camera_calibration.yaml',
     output: str = 'data/cube_config.yaml',
