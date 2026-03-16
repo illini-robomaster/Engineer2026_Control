@@ -93,6 +93,11 @@ ik_teleop_node:
     # worst-case per control tick (still well within the 16 ms budget at 60 Hz).
     n_random_seeds: 15
 
+    # Per-tick CSV debug log.  Set to a file path to enable (e.g. "/tmp/ik_debug.csv").
+    # Captures target pose, IK result, joints, FK, orientation error per axis.
+    # Leave empty to disable.
+    debug_log: ""
+
     joint_names:
       - Joint1
       - Joint2
@@ -182,7 +187,7 @@ moveit_teleop_node:
 
     # Position-only planning by default.  Set true only after camera->robot
     # orientation calibration is validated.
-    control_orientation: false
+    control_orientation: true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # keyboard_teleop_node  (manual debug, run in a separate terminal)

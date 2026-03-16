@@ -13,6 +13,13 @@ When coast time exceeds max_coast_s → returns None (arm should halt)
 
 Additionally enforces a max EE velocity so detection glitches cannot
 produce sudden jumps.
+
+Orientation filtering:
+  - Angular rate gate: clamps the per-frame orientation change to max_ori_rate
+    so detection glitches (AprilTag ambiguity flips, tag appear/disappear) are
+    smoothly absorbed instead of snapping the arm.
+  - NLERP EMA: blends the accepted measurement toward the current orientation
+    for additional smoothing.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import numpy as np
 
 
 class PoseFilter:
-    """Kalman filter for cube position with orientation holdover.
+    """Kalman filter for cube position with orientation smoothing.
 
     Parameters
     ----------
@@ -37,6 +44,16 @@ class PoseFilter:
     max_coast_s : float
         Maximum time (s) to coast without a measurement before returning
         None (which causes the arm to halt via detection_timeout_s).
+    max_ori_rate : float
+        Maximum allowed orientation change rate (rad/s).  When the angle
+        between consecutive detected quaternions exceeds this rate, the
+        step is clamped — the filter advances only by the allowed amount.
+        Prevents AprilTag ambiguity flips from jerking the arm.
+    ori_ema_alpha : float
+        NLERP exponential moving average factor for orientation.
+        0.0 = infinite smoothing (never updates), 1.0 = no smoothing.
+        Applied AFTER the rate gate, so normal motion is smoothed gently
+        and glitches are doubly attenuated.
     """
 
     def __init__(
@@ -46,12 +63,16 @@ class PoseFilter:
         max_vel: float = 0.5,
         max_coast_s: float = 0.5,
         reversal_boost: float = 8.0,
+        max_ori_rate: float = 5.0,
+        ori_ema_alpha: float = 0.5,
     ):
         self._q_std = process_noise
         self._r_std = meas_noise
         self._max_vel = max_vel
         self._max_coast_s = max_coast_s
         self._reversal_boost = reversal_boost
+        self._max_ori_rate = max_ori_rate
+        self._ori_alpha = ori_ema_alpha
 
         # Measurement matrix: observe [x, y, z] from state [x, y, z, vx, vy, vz]
         self._H = np.zeros((3, 6))
@@ -66,6 +87,7 @@ class PoseFilter:
         self._coast_time = 0.0
         self._prev_meas: np.ndarray | None = None    # for direction reversal detection
         self._last_q_boost: float = 1.0               # exposed for diagnostics
+        self._ori_dt_accum: float = 0.0               # time since last orientation update
 
     def step(
         self,
@@ -86,12 +108,15 @@ class PoseFilter:
         (filtered_pos, filtered_quat) — both in camera frame.
         Returns (None, None) if not yet initialised or coast time exceeded.
         """
+        self._ori_dt_accum += dt
+
         if cube_pos is not None:
             if not self._initialized:
                 self._x[:3] = cube_pos
                 self._x[3:] = 0.0
                 self._P = np.eye(6) * 0.01
                 self._last_quat = cube_quat.copy() if cube_quat is not None else None
+                self._ori_dt_accum = 0.0
                 self._initialized = True
                 self._coast_time = 0.0
                 self._prev_meas = cube_pos.copy()
@@ -119,7 +144,7 @@ class PoseFilter:
                 self._predict(dt, q_boost=q_boost)
                 self._update(cube_pos)
                 if cube_quat is not None:
-                    self._last_quat = cube_quat.copy()
+                    self._last_quat = self._filter_orientation(cube_quat)
                 self._coast_time = 0.0
         else:
             if not self._initialized:
@@ -146,6 +171,57 @@ class PoseFilter:
         self._initialized = False
         self._coast_time = 0.0
         self._last_quat = None
+        self._ori_dt_accum = 0.0
+
+    # ── Orientation filtering ─────────────────────────────────────────────────
+
+    def _filter_orientation(self, new_quat: np.ndarray) -> np.ndarray:
+        """Angular rate gate + NLERP EMA for orientation smoothing.
+
+        1. Antipodal check — ensure shortest rotation path (q ≡ -q).
+        2. Rate gate — if the angular change since the last accepted frame
+           exceeds max_ori_rate, clamp: advance only by the allowed amount
+           toward the measurement (no hard rejection, so the filter still
+           tracks real motion).
+        3. NLERP EMA — blend the (possibly clamped) measurement with the
+           current orientation for additional smoothing.
+        """
+        if self._last_quat is None:
+            self._ori_dt_accum = 0.0
+            return new_quat.copy()
+
+        q = new_quat.copy()
+
+        # Antipodal check — pick the hemisphere closer to _last_quat
+        if np.dot(self._last_quat, q) < 0:
+            q = -q
+
+        # Angular distance between current filtered and new measurement
+        dot = np.clip(float(np.dot(self._last_quat, q)), -1.0, 1.0)
+        angle = 2.0 * np.arccos(dot)   # radians
+
+        ori_dt = max(self._ori_dt_accum, 1e-6)
+        self._ori_dt_accum = 0.0
+
+        # Rate gate: clamp angular step to max_ori_rate * dt
+        if angle > 1e-6:
+            max_angle = self._max_ori_rate * ori_dt
+            if angle > max_angle:
+                # Clamp: advance only the allowed fraction toward measurement
+                t = max_angle / angle
+                q = self._nlerp(self._last_quat, q, t)
+
+        # NLERP EMA blend
+        return self._nlerp(self._last_quat, q, self._ori_alpha)
+
+    @staticmethod
+    def _nlerp(q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
+        """Normalized linear interpolation between two unit quaternions."""
+        result = (1.0 - alpha) * q0 + alpha * q1
+        n = float(np.linalg.norm(result))
+        if n > 1e-6:
+            return result / n
+        return q0.copy()
 
     # ── Internals ─────────────────────────────────────────────────────────────
 

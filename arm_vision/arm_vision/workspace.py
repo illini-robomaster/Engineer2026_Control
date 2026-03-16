@@ -159,3 +159,28 @@ class WorkspaceMapper:
         cam_y_hi = cube_pos[1] + room_lo[2] / g[1]
 
         return float(cam_x_lo), float(cam_x_hi), float(cam_y_lo), float(cam_y_hi)
+
+    # ── Z-zone shift ─────────────────────────────────────────────────────
+
+    def shift_z_zone(self, delta_z: float,
+                     current_cube_pos: np.ndarray | None = None):
+        """Shift Z workspace by *delta_z* (robot frame, positive = up).
+
+        Adjusts cam_origin so the arm does not jump — the current cube
+        position continues to map to the same EE target.
+        """
+        self._ee_home[2] += delta_z
+        if current_cube_pos is not None:
+            # Continuity: same cube_Y must produce the same robot_Z
+            self._cam_origin[1] -= delta_z / self._gain[1]
+        self._dist_home = float(np.linalg.norm(self._ee_home))
+
+    @property
+    def z_limits(self) -> tuple[float, float]:
+        """Safety-clamp Z boundaries (pos_min[2], pos_max[2])."""
+        return float(self._pos_min[2]), float(self._pos_max[2])
+
+    @property
+    def ee_home_z(self) -> float:
+        """Current Z-axis home of the workspace mapping."""
+        return float(self._ee_home[2])

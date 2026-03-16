@@ -158,21 +158,67 @@ class UartBridgeNode(Node):
         )
 
         self._ser: Optional['serial.Serial'] = None
+        self._ser_lock  = threading.Lock()   # guards self._ser open/close
+        self._ser_to    = ser_to
+        self._reconnect_warn_t: float = 0.0  # throttle reconnect log spam
+        self._port_open_t: float = 0.0       # monotonic time when port first opened
+        self._tx_gate_timeout = p('tx_gate_timeout_s', 3.0)  # send even without encoder data
+
         if not self._port:
             self.get_logger().error(
                 '"port" param not set. Pass uart_port:=/dev/yourdevice at launch.')
         elif not _SERIAL_OK:
             self.get_logger().error('pyserial not installed: pip install pyserial')
         else:
-            try:
-                self._ser = serial.Serial(self._port, self._baud, timeout=ser_to)
-                self.get_logger().info(f'Opened {self._port} @ {self._baud}')
-            except serial.SerialException as e:
-                self.get_logger().error(f'Cannot open {self._port}: {e}')
+            # Start all three threads unconditionally.  _reconnect_loop will open
+            # the port whenever it becomes available; TX/RX threads skip serial
+            # operations (but keep processing ROS state) until the port is open.
+            threading.Thread(target=self._reconnect_loop, daemon=True).start()
+            threading.Thread(target=self._rx_loop,        daemon=True).start()
+            threading.Thread(target=self._tx_loop,        daemon=True).start()
 
-        if self._ser:
-            threading.Thread(target=self._rx_loop, daemon=True).start()
-            threading.Thread(target=self._tx_loop, daemon=True).start()
+    # ---- serial reconnect loop ----------------------------------------------
+
+    def _reconnect_loop(self):
+        """Open the serial port on startup; reopen after any error.
+
+        Retries every second so the node stays alive while the STM32 is
+        unplugged or the USB-UART adapter is not yet enumerated.  TX and RX
+        threads see self._ser == None and skip serial operations until this
+        loop sets it.
+        """
+        retry_s = 1.0
+        while self._running and rclpy.ok():
+            with self._ser_lock:
+                already_open = self._ser is not None and self._ser.is_open
+            if already_open:
+                time.sleep(retry_s)
+                continue
+            try:
+                ser = serial.Serial(self._port, self._baud, timeout=self._ser_to)
+                with self._ser_lock:
+                    self._ser = ser
+                if self._port_open_t == 0.0:
+                    self._port_open_t = time.monotonic()
+                self.get_logger().info(
+                    f'Serial port opened: {self._port} @ {self._baud}')
+            except serial.SerialException as e:
+                now = time.monotonic()
+                if now - self._reconnect_warn_t > 5.0:
+                    self.get_logger().warn(
+                        f'Waiting for {self._port} ({e}) — retrying every {retry_s:.0f}s')
+                    self._reconnect_warn_t = now
+                time.sleep(retry_s)
+
+    def _close_port(self, ser_instance):
+        """Close and clear self._ser if it matches ser_instance (avoids double-close)."""
+        with self._ser_lock:
+            if self._ser is ser_instance:
+                try:
+                    ser_instance.close()
+                except Exception:
+                    pass
+                self._ser = None
 
     # ---- servo topic --------------------------------------------------------
 
@@ -298,12 +344,26 @@ class UartBridgeNode(Node):
                 age    = (time.monotonic() - self._cmd_t) if self._cmd else 999.0
 
             # Gate on first valid encoder frame.  Before that we don't
-            # know the real arm position — TX-ing zeros would snap the
-            # arm and publishing zeros on /joint_states misleads MoveIt.
+            # know the real arm position — TX-ing zeros could snap the arm.
+            # BUT: if no encoder data arrives within tx_gate_timeout_s after
+            # the serial port opens, start TX anyway to break the dependency
+            # on MCU TX.  The MCU's bumpless-enable holdoff (500 ms) prevents
+            # the snap-to-zero race — it ignores cmd_target_deg updates for
+            # long enough for the ROS side to receive real encoder data.
             if not got and not active:
-                continue
+                port_age = (time.monotonic() - self._port_open_t
+                            if self._port_open_t > 0.0 else 0.0)
+                if port_age < self._tx_gate_timeout:
+                    continue
+                # Timeout: send anyway to break MCU-TX dependency.
+                # Log once so the user knows this is happening.
+                if not hasattr(self, '_tx_gate_warned'):
+                    self._tx_gate_warned = True
+                    self.get_logger().warn(
+                        f'No encoder data after {self._tx_gate_timeout:.0f}s '
+                        f'— sending TX anyway (MCU holdoff will protect arm)')
 
-            # Publish /joint_states from real encoder data.
+            # Publish /joint_states from real encoder data only.
             if self._override and got:
                 js = JointState()
                 js.header.stamp = self.get_clock().now().to_msg()
@@ -312,11 +372,15 @@ class UartBridgeNode(Node):
 
             # Idle hold: no active trajectory and command is stale.
             # Priority: last commanded position → real encoder position.
+            # Never fall back to hw if we haven't received encoder data yet —
+            # hw is initialised to zeros and would snap the arm to zero.
             if not active and age > self._cmd_to:
                 if cmd is not None:
                     hold_pos = [cmd.get(n, 0.0) for n in self._joints]
-                else:
+                elif got:
                     hold_pos = hw
+                else:
+                    continue  # no command and no encoder data — skip TX
                 cmd = dict(zip(self._joints, hold_pos))
                 with self._lock:
                     self._cmd, self._cmd_t = cmd, time.monotonic()
@@ -325,11 +389,17 @@ class UartBridgeNode(Node):
             if not cmd or age > self._cmd_to:
                 continue
 
+            # Snapshot the port reference under lock; skip if not yet open.
+            with self._ser_lock:
+                ser = self._ser
+            if ser is None:
+                continue
+
             vals = [s * r * math.degrees(cmd.get(n, 0.0))
                     for n, s, r in zip(self._joints, self._sign, self._ratio)]
             frame = _pack_frame(vals)
             try:
-                self._ser.write(frame)
+                ser.write(frame)
                 self._tx_count += 1
                 if self._debug_tx:
                     src = 'TRAJ' if active else 'HOLD'
@@ -338,21 +408,27 @@ class UartBridgeNode(Node):
                         f'({" ".join(f"{v:+.2f}" for v in vals)}deg)')
             except serial.SerialException as e:
                 self.get_logger().warn(f'TX error: {e}')
-                time.sleep(0.1)
+                self._close_port(ser)
 
     # ---- RX loop ------------------------------------------------------------
 
     def _rx_loop(self):
         first = True
         while self._running and rclpy.ok():
+            # Snapshot port; wait if not yet open.
+            with self._ser_lock:
+                ser = self._ser
+            if ser is None:
+                time.sleep(0.05)
+                continue
             try:
                 # Byte-hunt: scan for SOF byte 0xA5, then read remaining 15 bytes.
-                sof = self._ser.read(1)
+                sof = ser.read(1)
                 if not sof:
                     continue
                 if sof[0] != _FRAME_SOF:
                     continue  # discard until aligned
-                rest = self._ser.read(_FRAME_SIZE - 1)
+                rest = ser.read(_FRAME_SIZE - 1)
                 if len(rest) != _FRAME_SIZE - 1:
                     continue  # timeout mid-frame
                 frame = bytes(sof) + rest
@@ -391,6 +467,7 @@ class UartBridgeNode(Node):
 
             except serial.SerialException as e:
                 self.get_logger().warn(f'RX error: {e}')
+                self._close_port(ser)
                 time.sleep(0.1)
             except Exception as e:
                 self.get_logger().error(f'RX loop: {e}')
@@ -398,9 +475,13 @@ class UartBridgeNode(Node):
 
     def destroy_node(self):
         self._running = False
-        if self._ser:
-            try: self._ser.close()
-            except Exception: pass
+        with self._ser_lock:
+            if self._ser:
+                try:
+                    self._ser.close()
+                except Exception:
+                    pass
+                self._ser = None
         super().destroy_node()
 
 

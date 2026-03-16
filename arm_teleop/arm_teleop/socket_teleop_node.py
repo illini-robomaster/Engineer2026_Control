@@ -475,7 +475,12 @@ class SocketTeleopNode(Node):
                 raw_quat = -raw_quat
             q_blend = a * self._smooth_quat + (1.0 - a) * raw_quat
             n = np.linalg.norm(q_blend)
-            self._smooth_quat = q_blend / n if n > 1e-6 else self._smooth_quat
+            if n > 1e-6:
+                self._smooth_quat = q_blend / n
+            else:
+                # Near-antipodal degeneration — skip blend, accept raw directly
+                # to prevent orientation from freezing at a stale value.
+                self._smooth_quat = raw_quat.copy()
 
         target_pos  = self._smooth_pos
         target_quat = self._smooth_quat

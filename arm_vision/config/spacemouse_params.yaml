@@ -14,8 +14,8 @@ spacemouse:
   poll_hz: 100
 
   # Workspace safety limits in base_link (metres)
-  pos_min: [0.10, -0.40, 0.10]
-  pos_max: [0.70, 0.40, 0.60]
+  pos_min: [0.05, -0.50, -0.30]
+  pos_max: [0.82,  0.50,  0.90]
 
   # 3×3 matrix (row-major, flat): maps [sm.x, sm.y, sm.z] → robot [X, Y, Z]
   # Default: SpaceMouse on desk facing arm

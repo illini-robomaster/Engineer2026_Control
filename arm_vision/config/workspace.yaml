@@ -18,7 +18,7 @@
 workspace:
   cam_origin: [0.0, 0.0, 0.30]
   ee_home:    [0.426, 0.0, 0.395]
-  gain:       [2.0, 2.0, 2.0]
+  gain:       [2.0, 4.0, 2.0]
 
   cam_to_robot:
     [ 0.0,  0.0,  -1.0,
@@ -28,7 +28,7 @@ workspace:
   # ── Safety limits ────────────────────────────────────────────────────────
   # Rectangular box (floor/ceiling/self-collision):
   pos_min: [0.05, -0.50, -0.40]
-  pos_max: [0.82,  0.50,  0.90]
+  pos_max: [0.82,  0.50,  0.80]
 
   # Spherical reach from base_link origin (coupled axis limits):
   reach_max: 0.82
@@ -40,6 +40,11 @@ workspace:
     meas_noise:    0.004
     max_vel:       0.5
     max_coast_s:   0.5
+    # Orientation smoothing (prevents AprilTag detection glitches from
+    # jerking the arm).  max_ori_rate clamps angular change per second;
+    # ori_ema_alpha blends new measurements (0=hold, 1=raw pass-through).
+    max_ori_rate:  5.0     # rad/s — ~286°/s, well above hand rotation speed
+    ori_ema_alpha: 0.4     # moderate smoothing, ~2-3 frame delay at 30 fps
 
   # ── Orientation ──────────────────────────────────────────────────────────
   # EE quaternion at home pose.  Orientation deltas applied relative to this.

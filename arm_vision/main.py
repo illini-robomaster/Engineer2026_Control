@@ -177,6 +177,8 @@ def cmd_run(args: argparse.Namespace):
         meas_noise=float(_filt_cfg.get('meas_noise', 0.005)),
         max_vel=float(_filt_cfg.get('max_vel', 0.5)),
         max_coast_s=float(_filt_cfg.get('max_coast_s', 0.5)),
+        max_ori_rate=float(_filt_cfg.get('max_ori_rate', 5.0)),
+        ori_ema_alpha=float(_filt_cfg.get('ori_ema_alpha', 0.5)),
     )
 
     import platform
@@ -267,8 +269,11 @@ def cmd_run(args: argparse.Namespace):
             'n_tags',           # number of known tags detected
             'det_ms',           # detection latency (ms) — 0 if no new frame
             'cube_x', 'cube_y', 'cube_z',   # raw detection (cam frame)
+            'cube_qx', 'cube_qy', 'cube_qz', 'cube_qw',  # raw orientation (cam frame)
             'filt_x', 'filt_y', 'filt_z',   # Kalman output (cam frame)
+            'filt_qx', 'filt_qy', 'filt_qz', 'filt_qw',  # filtered orientation
             'ee_x',   'ee_y',   'ee_z',     # mapped EE target (robot frame)
+            'ee_qx',  'ee_qy',  'ee_qz',  'ee_qw',       # mapped EE orientation
             'reach',            # reach fraction 0..1
             'kf_vx',  'kf_vy',  'kf_vz',   # Kalman velocity estimate
             'q_boost',          # Kalman direction-change boost (1.0 = none)
@@ -350,6 +355,8 @@ def cmd_run(args: argparse.Namespace):
                     state_str = 'NONE'
                 kf_vel = pose_filter.velocity
                 q_boost = pose_filter.last_q_boost
+                def _qf(q):
+                    return [f'{q[i]:.6f}' for i in range(4)] if q is not None else ['','','','']
                 log_writer.writerow([
                     f'{t_now:.4f}',
                     f'{dt*1000:.2f}',
@@ -359,12 +366,15 @@ def cmd_run(args: argparse.Namespace):
                     f'{d_pos[0]:.5f}' if d_pos is not None else '',
                     f'{d_pos[1]:.5f}' if d_pos is not None else '',
                     f'{d_pos[2]:.5f}' if d_pos is not None else '',
+                    *_qf(d_quat),
                     f'{filt_pos[0]:.5f}' if filt_pos is not None else '',
                     f'{filt_pos[1]:.5f}' if filt_pos is not None else '',
                     f'{filt_pos[2]:.5f}' if filt_pos is not None else '',
+                    *_qf(filt_quat),
                     f'{ee_pos[0]:.5f}' if ee_pos is not None else '',
                     f'{ee_pos[1]:.5f}' if ee_pos is not None else '',
                     f'{ee_pos[2]:.5f}' if ee_pos is not None else '',
+                    *_qf(ee_quat),
                     f'{reach_frac:.4f}',
                     f'{kf_vel[0]:.4f}', f'{kf_vel[1]:.4f}', f'{kf_vel[2]:.4f}',
                     f'{q_boost:.1f}',
@@ -445,6 +455,13 @@ def cmd_run(args: argparse.Namespace):
 
                 # ── Reach gauge bar ───────────────────────────────────
                 _draw_reach_gauge(vis, reach_frac, x=w_img - 50, y=30, h=200)
+
+                # ── Z value indicator ─────────────────────────────────
+                if ee_pos is not None:
+                    z_col = (0, 255, 255)
+                    cv2.putText(vis, f'Z {ee_pos[2]:+.2f}m',
+                                (w_img - 130, 270),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, z_col, 1)
 
                 elapsed = time.monotonic() - t0
                 send_hz = send_count / max(elapsed, 1e-3)
@@ -533,7 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     cb = sub.add_parser('calibrate-cube',
                         help='Calibrate 5-face AprilTag cube geometry.')
     cb.add_argument('--device',      type=int,   default=0)
-    cb.add_argument('--tag-family',  default='tag36h11', dest='tag_family')
+    cb.add_argument('--tag-family',  default='tag25h9', dest='tag_family')
     cb.add_argument('--tag-size', type=float, default=0.032,
                     dest='tag_size',
                     help='AprilTag black-square side in metres (default: 0.032)')

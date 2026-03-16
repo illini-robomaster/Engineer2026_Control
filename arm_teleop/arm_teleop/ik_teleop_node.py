@@ -35,7 +35,9 @@ Parameters:
 
 from __future__ import annotations
 
+import csv
 import json
+import os
 import socket
 import threading
 import time
@@ -320,6 +322,40 @@ class IkTeleopNode(Node):
         self._diag_last_seed       = ''
         self._ik_fail_log_time: float = 0.0
 
+        # ── Per-tick debug CSV log ──────────────────────────────────────────
+        debug_log_path = p('debug_log', '')
+        self._csv_file = None
+        self._csv_writer = None
+        if debug_log_path:
+            os.makedirs(os.path.dirname(debug_log_path) or '.', exist_ok=True)
+            self._csv_file = open(debug_log_path, 'w', newline='')
+            self._csv_writer = csv.writer(self._csv_file)
+            self._csv_writer.writerow([
+                't_mono',                          # monotonic timestamp (s)
+                'dt_ms',                           # time since tick start (ms) — solve time
+                'age_ms',                          # time since last socket msg (ms)
+                # Target pose from socket (before offset)
+                'tgt_x', 'tgt_y', 'tgt_z',
+                'tgt_qx', 'tgt_qy', 'tgt_qz', 'tgt_qw',
+                # Target quaternion after ee_ori_offset
+                'off_qx', 'off_qy', 'off_qz', 'off_qw',
+                # IK outcome
+                'result',                          # 6D / POS_ONLY / SNAP / FAIL / DEADBAND / TIMEOUT
+                'seed',                            # winning seed label
+                'max_jump_rad',                    # largest joint delta from last_solved
+                'vel_clamped',                     # 1 if velocity limiter fired
+                # Solved joints
+                'j1', 'j2', 'j3', 'j4', 'j5', 'j6',
+                # Current joint_states (hardware feedback)
+                'js1', 'js2', 'js3', 'js4', 'js5', 'js6',
+                # FK of solution
+                'fk_x', 'fk_y', 'fk_z',
+                'fk_err_mm',                       # position error (mm)
+                # Orientation error (degrees) — total + per-axis
+                'ori_err_deg', 'ori_rx', 'ori_ry', 'ori_rz',
+            ])
+            self.get_logger().info(f'Debug CSV → {debug_log_path}')
+
         self.get_logger().info(
             f'ik_teleop_node ready -- listening on {self._host}:{self._port}  '
             f'rate={self._rate_hz:.0f}Hz  traj_dur={self._traj_dur*1000:.0f}ms  '
@@ -533,7 +569,7 @@ class IkTeleopNode(Node):
                 init_pos_err = pos_norm
                 init_ori_err = ori_norm
 
-            if pos_norm < 1e-3 and ori_norm < 0.01:   # 1 mm + ~0.6 deg
+            if pos_norm < 1e-3 and ori_norm < 0.035:   # 1 mm + ~2.0 deg
                 return list(q)
 
             # Build weighted 6D error and scale angular Jacobian rows
@@ -553,9 +589,22 @@ class IkTeleopNode(Node):
             if dq_norm < 1e-9:
                 stop_reason = 'stuck'
                 break
-            if dq_norm > 0.15:
-                dq *= 0.15 / dq_norm
+            if dq_norm > 0.20:
+                dq *= 0.20 / dq_norm
             q = np.clip(q + dq, lowers, uppers)
+
+        # Near-miss acceptance: if the solver ran out of iterations but got
+        # close, accept the result.  2mm + 3° is tight enough that orientation
+        # tracking looks correct but loose enough to catch cases that stall
+        # just above the primary convergence threshold.
+        if stop_reason == 'max_iters':
+            p_f, R_f, _ = _fk_and_jac(self._chain_data, q)
+            R_ef = R_tgt @ R_f.T
+            e_rf = 0.5 * np.array([R_ef[2,1]-R_ef[1,2], R_ef[0,2]-R_ef[2,0], R_ef[1,0]-R_ef[0,1]])
+            final_pos = float(np.linalg.norm(target_pos - p_f))
+            final_ori = float(np.linalg.norm(e_rf))
+            if final_pos < 2e-3 and final_ori < 0.052:   # 2 mm + ~3.0 deg
+                return list(q)
 
         if log_fail:
             p_f, R_f, _ = _fk_and_jac(self._chain_data, q)
@@ -646,6 +695,49 @@ class IkTeleopNode(Node):
                 hi = mid   # too far, back off
         return best
 
+    # ── CSV tick logger ──────────────────────────────────────────────────────
+
+    def _log_csv_row(
+        self, t_tick: float, solve_ms: float, age: float,
+        tgt_pos, raw_quat, off_quat,
+        result_type: str, seed: str,
+        max_jump, vel_clamped: bool,
+        result_joints, js_list,
+    ):
+        if self._csv_writer is None:
+            return
+        fk_x = fk_y = fk_z = fk_err = ''
+        ori_err = ori_rx = ori_ry = ori_rz = ''
+        if result_joints is not None and tgt_pos is not None:
+            p_sol, R_sol, _ = _fk_and_jac(self._chain_data, np.array(result_joints))
+            fk_x, fk_y, fk_z = f'{p_sol[0]:.5f}', f'{p_sol[1]:.5f}', f'{p_sol[2]:.5f}'
+            fk_err = f'{np.linalg.norm(tgt_pos - p_sol)*1000:.2f}'
+            if off_quat is not None and self._ctrl_ori:
+                R_tgt = _quat_to_mat3(off_quat)
+                R_e = R_tgt @ R_sol.T
+                e_r = 0.5 * np.array([R_e[2,1]-R_e[1,2], R_e[0,2]-R_e[2,0], R_e[1,0]-R_e[0,1]])
+                e_deg = e_r * 180.0 / np.pi
+                ori_err = f'{float(np.linalg.norm(e_r))*180/np.pi:.2f}'
+                ori_rx, ori_ry, ori_rz = f'{e_deg[0]:.2f}', f'{e_deg[1]:.2f}', f'{e_deg[2]:.2f}'
+
+        def _qf(q):
+            return [f'{q[i]:.6f}' for i in range(4)] if q is not None else [''] * 4
+        def _jf(j):
+            return [f'{v:.5f}' for v in j] if j is not None else [''] * 6
+        def _pf(p):
+            return [f'{p[i]:.5f}' for i in range(3)] if p is not None else [''] * 3
+
+        self._csv_writer.writerow([
+            f'{t_tick:.4f}', f'{solve_ms:.2f}', f'{age*1000:.1f}',
+            *_pf(tgt_pos), *_qf(raw_quat), *_qf(off_quat),
+            result_type, seed,
+            f'{max_jump:.4f}' if max_jump is not None else '',
+            '1' if vel_clamped else '0',
+            *_jf(result_joints), *_jf(js_list),
+            fk_x, fk_y, fk_z, fk_err,
+            ori_err, ori_rx, ori_ry, ori_rz,
+        ])
+
     # ── Control loop (30 Hz) ─────────────────────────────────────────────────
 
     def _control_loop(self):
@@ -665,6 +757,7 @@ class IkTeleopNode(Node):
 
         # Apply static EE frame offset (right-multiply) to compensate for the
         # mismatch between the teleop's zero orientation and the URDF EE frame.
+        raw_quat = target_quat.copy() if target_quat is not None else None
         if target_quat is not None:
             target_quat = _quat_mul(target_quat, self._ee_ori_offset)
             n = float(np.linalg.norm(target_quat))
@@ -699,24 +792,40 @@ class IkTeleopNode(Node):
 
         # Time budget: at 60Hz each tick has ~16ms.  Reserve ~4ms for snap fallback.
         tick_budget = 1.0 / self._rate_hz
+        # Cap per-seed iterations for 6D IK so multiple seeds fit within
+        # the time budget.  200 iters is enough for frame-to-frame deltas
+        # with the relaxed convergence threshold (0.035 rad).
+        ik_iters = 200 if (self._ctrl_ori and target_quat is not None) else 500
         result, winning_seed = self._try_ik(
             target_pos, target_quat, seeds_to_try, log_fail=False,
-            time_budget=tick_budget * 0.7)
+            max_iters=ik_iters, time_budget=tick_budget * 0.7)
 
         # Reject solutions that require a large jump from the last commanded position.
         # Catches configuration flips (e.g. J4 ±180°) that are geometrically valid
         # but would violently snap the arm mid-motion.
         # Only active after the first solve — initial positioning is unrestricted.
+        #
+        # Exception: when control_orientation is active, 6D IK solutions are
+        # allowed through even with large jumps — the velocity limiter
+        # (max_joint_vel_rad_s) smooths the transition.  Hard-rejecting forces
+        # pos-only fallback, which locks the arm in a configuration that can
+        # never match the target orientation.
         jump_rejected = False
+        is_6d_solve = self._ctrl_ori and target_quat is not None
         if result is not None and self._max_joint_jump > 0.0 and last_solved is not None:
             max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
             if max_jump > self._max_joint_jump:
-                self.get_logger().debug(
-                    f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
-                    f'seed={winning_seed}  threshold={self._max_joint_jump}')
-                result = None
-                jump_rejected = True
-                self._diag_jump_rejects += 1
+                if is_6d_solve:
+                    self.get_logger().debug(
+                        f'[ik] 6D jump allowed  max_jump={max_jump:.3f}rad  '
+                        f'seed={winning_seed}  vel_limiter will smooth')
+                else:
+                    self.get_logger().debug(
+                        f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
+                        f'seed={winning_seed}  threshold={self._max_joint_jump}')
+                    result = None
+                    jump_rejected = True
+                    self._diag_jump_rejects += 1
 
         # ── Position-only fallback when 6D IK fails ───────────────────────
         # The most common 6D failure is orientation unreachable (wrist singularity
@@ -733,6 +842,13 @@ class IkTeleopNode(Node):
                 pos_only_fallback = True
                 winning_seed = winning_seed + '/pos_only'
                 self._diag_pos_only_fb += 1
+                # Warn periodically when pos-only fallback fires — the user
+                # may not realise orientation is being silently dropped.
+                if self._diag_pos_only_fb in (1, 10, 50) or self._diag_pos_only_fb % 100 == 0:
+                    self.get_logger().warn(
+                        f'[ik] orientation unreachable — fell back to pos-only IK '
+                        f'(count={self._diag_pos_only_fb}).  EE orientation is NOT '
+                        f'tracking target.  Check ori_weight or target orientation.')
                 # Re-check jump guard for the pos-only solution
                 if self._max_joint_jump > 0.0 and last_solved is not None:
                     max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
@@ -760,11 +876,17 @@ class IkTeleopNode(Node):
                     f'Check: (1) target in workspace?  (2) orientation reachable?  '
                     f'(3) increase ori_weight if pos converges but ori does not')
             self._diag_fails += 1
+            self._log_csv_row(
+                t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
+                target_pos, raw_quat, target_quat,
+                'FAIL', '', None, False, None, js_seed)
             return
 
         # ── Joint-space velocity limiting ─────────────────────────────────
         # Smooths transitions when IK re-acquires after traversing an
         # unreachable zone.  Each joint is clamped to max_joint_vel per tick.
+        pre_vel_max_jump = (max(abs(r - c) for r, c in zip(result, last_solved))
+                            if last_solved is not None else None)
         vel_clamped = False
         if last_solved is not None and self._max_joint_vel > 0.0:
             max_step = self._max_joint_vel / self._rate_hz
@@ -780,6 +902,7 @@ class IkTeleopNode(Node):
             max_delta = max(abs(r - c) for r, c in zip(result, last_solved))
             if max_delta < self._joint_deadband:
                 self._diag_deadbands += 1
+                # Don't log DEADBAND ticks — they're noise (no motion)
                 return
 
         # Track IK solve time
@@ -806,6 +929,21 @@ class IkTeleopNode(Node):
         with self._lock:
             self._last_solved_joints = list(result)
         self._diag_solves += 1
+
+        # Determine result type label for CSV
+        if pos_only_fallback:
+            csv_type = 'POS_ONLY'
+        elif used_snap:
+            csv_type = 'SNAP'
+        elif is_6d_solve:
+            csv_type = '6D'
+        else:
+            csv_type = '3D'
+        self._log_csv_row(
+            t_tick_start, solve_ms, age,
+            target_pos, raw_quat, target_quat,
+            csv_type, winning_seed, pre_vel_max_jump, vel_clamped,
+            result, js_seed)
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -834,22 +972,40 @@ class IkTeleopNode(Node):
         total = solves + fails
         fail_pct = (fails / max(total, 1)) * 100
 
-        # FK to check position error between target and actual solved pose
+        # FK to check position + orientation error between target and solved pose
         fk_err_str = ''
+        ori_err_str = ''
         if last_joints is not None:
-            p_solved, _, _ = _fk_and_jac(self._chain_data, np.array(last_joints))
+            p_solved, R_solved, _ = _fk_and_jac(self._chain_data, np.array(last_joints))
             fk_err = float(np.linalg.norm(target_pos - p_solved))
             fk_err_str = f'  fk_err={fk_err*1000:.1f}mm'
 
-        joints_str = (f'[{", ".join(f"{p:+.3f}" for p in last_joints)}]'
-                      if last_joints else 'none')
+            # Orientation error (only meaningful when ctrl_ori is true)
+            with self._lock:
+                tgt_quat = self._target_quat
+            if self._ctrl_ori and tgt_quat is not None:
+                tgt_q = tgt_quat.copy()
+                if self._ee_ori_offset is not None:
+                    tgt_q = _quat_mul(tgt_q, self._ee_ori_offset)
+                    n = float(np.linalg.norm(tgt_q))
+                    if n > 1e-9:
+                        tgt_q = tgt_q / n
+                R_tgt = _quat_to_mat3(tgt_q)
+                R_e = R_tgt @ R_solved.T
+                e_r = 0.5 * np.array([R_e[2,1]-R_e[1,2], R_e[0,2]-R_e[2,0], R_e[1,0]-R_e[0,1]])
+                ori_err_deg = float(np.linalg.norm(e_r)) * 180.0 / np.pi
+                # Per-axis breakdown helps diagnose constant offsets (e.g. pitch=-30°)
+                e_deg = e_r * 180.0 / np.pi
+                ori_err_str = (f'  ori_err={ori_err_deg:.1f}°'
+                               f'(rx={e_deg[0]:.1f} ry={e_deg[1]:.1f} rz={e_deg[2]:.1f})')
+
         self.get_logger().info(
             f'[diag] age={age:.2f}s  '
             f'solves={solves} fails={fails}({fail_pct:.0f}%)  '
             f'ik_avg={avg_ms:.1f}ms ik_max={solve_ms_max:.1f}ms  '
             f'snaps={snaps} pos_only={pos_only_fb} vel_clamps={vel_clamps} '
             f'jump_rej={jump_rejects} deadband={deadbands}  '
-            f'seed={last_seed}{fk_err_str}  '
+            f'seed={last_seed}{fk_err_str}{ori_err_str}  '
             f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})')
 
 
@@ -861,6 +1017,9 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        if node._csv_file is not None:
+            node._csv_file.close()
+            node.get_logger().info('Debug CSV closed.')
         node.destroy_node()
         rclpy.shutdown()
 

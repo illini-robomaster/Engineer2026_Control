@@ -90,7 +90,7 @@ class CubeDetector:
 
         cfg   = cube_config
         self._tag_size = float(cfg.get('tag_size', cfg.get('side_length', 0.032)))
-        self._family   = cfg.get('tag_family', 'tag36h11')
+        self._family   = cfg.get('tag_family', 'tag25h9')
 
         # tag_data[tag_id] = {'pos': np.array [x,y,z], 'q': np.array [x,y,z,w]}
         # Both are the tag's pose in the cube frame.
