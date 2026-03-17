@@ -36,8 +36,8 @@ joint_limits:
     max_acceleration: 6.0
   Joint5:
     has_position_limits: true
-    min_position: -1.5708    # -90 deg
-    max_position:  1.5708    # +90 deg
+    min_position: -2.6180    # -150 deg
+    max_position:  2.6180    # +150 deg
     has_velocity_limits: false
     max_velocity: 3.0        # matches MCU ARM_VEL_LIM[4]
     has_acceleration_limits: false

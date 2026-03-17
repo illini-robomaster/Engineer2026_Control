@@ -33,7 +33,8 @@ def _bar(value: float, lo: float, hi: float, width: int = 10) -> str:
     return '█' * filled + '░' * (width - filled)
 
 
-_VIZ_LINES = 3   # number of lines render_pose prints
+_VIZ_LINES     = 4   # number of lines render_pose prints
+_ASM_VIZ_LINES = 6   # number of lines render_assembly prints
 
 def render_pose(
     pos: 'np.ndarray',
@@ -41,6 +42,7 @@ def render_pose(
     pos_min: 'np.ndarray',
     pos_max: 'np.ndarray',
     init_pos: 'np.ndarray',
+    feedback: dict,
     first: bool = False,
 ) -> None:
     """Overwrite the last _VIZ_LINES terminal lines with a live 6-DOF display."""
@@ -61,6 +63,13 @@ def render_pose(
         f"   Y {yaw:+6.3f}   |{_bar(yaw,   -1, 1, w)}|"
     )
     line3 = "─" * len(line1)
+    if 'fk_x' in feedback:
+        ik_str = 'OK' if feedback.get('ik_ok', True) else 'SNAP/FAIL'
+        line4 = (f"  FK  X {feedback['fk_x']:+7.3f}m"
+                 f"   Y {feedback['fk_y']:+7.3f}m"
+                 f"   Z {feedback['fk_z']:+7.3f}m   IK:{ik_str}")
+    else:
+        line4 = "  FK  (no feedback yet)"
 
     if not first:
         # Move cursor up _VIZ_LINES lines to overwrite previous display
@@ -69,6 +78,50 @@ def render_pose(
     print(line3)
     print(line1)
     print(line2)
+    print(line4)
+
+
+def render_assembly(
+    fsm: 'AssemblyFSM',
+    pos: 'np.ndarray',
+    difficulty: int,
+    q_target: float,
+    feedback: dict,
+    first: bool = False,
+) -> None:
+    """Overwrite terminal lines with assembly-mode status display."""
+    from assembly_fsm import AssemblyState
+
+    width = 60
+    sep = '─' * width
+
+    # Status line for READY_CONFIRM
+    hint = fsm.stage_hint
+    if fsm.state == AssemblyState.READY_CONFIRM:
+        hint = '  OK — press LEFT to confirm' if fsm.can_confirm else '  Waiting for stability...'
+
+    if 'fk_x' in feedback:
+        ik_str = 'OK' if feedback.get('ik_ok', True) else 'SNAP/FAIL'
+        fb_line = (f'  FK  X {feedback["fk_x"]:+7.3f}'
+                   f'  Y {feedback["fk_y"]:+7.3f}'
+                   f'  Z {feedback["fk_z"]:+7.3f}  IK:{ik_str}')
+    else:
+        fb_line = '  FK  (no feedback — is IK node running?)'
+
+    lines = [
+        sep,
+        f'  [ASSEMBLY] Difficulty {difficulty} | Q-target: {q_target}°',
+        f'  State: {fsm.stage_label}',
+        f'  Cmd: X {pos[0]:+7.3f}  Y {pos[1]:+7.3f}  Z {pos[2]:+7.3f}',
+        hint,
+        fb_line,
+    ]
+
+    if not first:
+        print(f'\033[{_ASM_VIZ_LINES}A', end='')
+
+    for line in lines:
+        print(line.ljust(width))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +139,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Global speed multiplier (default: 1.0)')
     p.add_argument('--no-socket', action='store_true', dest='no_socket',
                    help='Dry-run: print poses instead of sending over TCP')
+    p.add_argument('--assembly', default=None,
+                   help='Path to assembly_params.yaml (enables assembly mode)')
+    p.add_argument('--difficulty', type=int, default=None,
+                   help='Override difficulty level (1-4)')
+    p.add_argument('--q-angle', type=float, default=None,
+                   help='Override Q-axis target angle (degrees)')
     return p
 
 
@@ -128,6 +187,18 @@ def main():
         client = PoseSocketClient(host=args.host, port=args.port)
         client.start()
 
+    # ── Assembly mode (optional) ───────────────────────────────────────────
+    if args.assembly:
+        from assembly_fsm import AssemblyFSM, AssemblyState, TaskConfig, load_assembly_config
+        asm_cfg = load_assembly_config(args.assembly,
+                                        difficulty_override=args.difficulty,
+                                        q_angle_override=args.q_angle)
+        fsm = AssemblyFSM(asm_cfg)
+        print(f'[assembly] Difficulty {asm_cfg.difficulty}, '
+              f'Q-angle={asm_cfg.q_target_deg}°')
+    else:
+        fsm = None
+
     # ── State ─────────────────────────────────────────────────────────────────
     ee_pos = cfg['init_pos'].copy()
     ee_rot = Rotation.from_quat(cfg['init_quat'])
@@ -135,8 +206,17 @@ def main():
     dt          = 1.0 / cfg['poll_hz']
     print_every = int(cfg['poll_hz'])   # status line once per second
     tick        = 0
+    prev_buttons = [0, 0]   # for edge detection
+    _arm_ready           = args.no_socket  # False until first homing completes (True in dry-run)
+    _homing_active       = False  # True from send_home() until homing + resync done
+    _homing_seen_running = False  # True once feedback showed homing=True
+    _homing_t            = 0.0   # monotonic time when homing was triggered
+    _ik_was_failing      = False  # True when last feedback showed ik_ok=False (manual mode)
 
-    print('[spacemouse] Running — Ctrl-C to stop.  Button 0 resets to home.')
+    if fsm is not None:
+        print('[spacemouse] Assembly mode — RIGHT: home and start, LEFT: advance/confirm.')
+    else:
+        print('[spacemouse] Ready — press RIGHT to home and start streaming.')
     print(f'[spacemouse] init_pos={ee_pos}  speed={args.speed}')
 
     try:
@@ -148,40 +228,163 @@ def main():
                 time.sleep(dt)
                 continue
 
-            # ── Position delta ─────────────────────────────────────────────
-            sm_lin  = np.array([state.x, state.y, state.z], dtype=float)
-            sm_lin  = np.where(np.abs(sm_lin) > cfg['deadband'], sm_lin, 0.0)
-            delta_p = (cfg['lin_map'] @ sm_lin) * cfg['linear_speed'] * args.speed * dt
-            ee_pos  = np.clip(ee_pos + delta_p, cfg['pos_min'], cfg['pos_max'])
+            # ── Raw inputs ─────────────────────────────────────────────────
+            sm_lin = np.array([state.x, state.y, state.z], dtype=float)
+            sm_lin = np.where(np.abs(sm_lin) > cfg['deadband'], sm_lin, 0.0)
 
-            # ── Raw angular input (always captured for visualization) ──────
             sm_ang = np.array([state.roll, state.pitch, state.yaw], dtype=float)
             sm_ang = np.where(np.abs(sm_ang) > cfg['deadband'], sm_ang, 0.0)
 
-            # ── Orientation delta (optional) ───────────────────────────────
-            if cfg['control_orientation']:
-                delta_r = (cfg['ang_map'] @ sm_ang) * cfg['angular_speed'] * args.speed * dt
-                ee_rot  = Rotation.from_rotvec(delta_r) * ee_rot
+            # ── Button edge detection ──────────────────────────────────────
+            buttons = list(state.buttons) if state.buttons else [0, 0]
+            left_edge  = buttons[0] and not prev_buttons[0]
+            right_edge = len(buttons) > 1 and buttons[1] and not prev_buttons[1]
+            prev_buttons = buttons[:2] if len(buttons) >= 2 else buttons + [0]
 
-            quat = ee_rot.as_quat()   # [x, y, z, w]
+            # Always compute delta_p — used for arc control even when translation gated
+            delta_p = (cfg['lin_map'] @ sm_lin) * cfg['linear_speed'] * args.speed * dt
 
-            # ── Button 0 → reset to home ───────────────────────────────────
-            if state.buttons and state.buttons[0]:
-                ee_pos = cfg['init_pos'].copy()
-                ee_rot = Rotation.from_quat(cfg['init_quat'])
-                print('[spacemouse] Reset to home')
+            if fsm is not None:
+                # ── Assembly mode ──────────────────────────────────────────
 
-            # ── Send / print ───────────────────────────────────────────────
-            if client is not None:
-                client.send_pose(
-                    x=float(ee_pos[0]),  y=float(ee_pos[1]),  z=float(ee_pos[2]),
-                    qx=float(quat[0]),   qy=float(quat[1]),
-                    qz=float(quat[2]),   qw=float(quat[3]),
-                )
+                # RIGHT → home + reset FSM (always, from any state)
+                if right_edge and not _homing_active:
+                    fsm.emergency_reset()
+                    ee_rot = Rotation.from_quat(cfg['init_quat'])
+                    if client is not None:
+                        client.send_home()
+                        _homing_active       = True
+                        _homing_seen_running = False
+                        _homing_t            = time.monotonic()
+                        print('\n[spacemouse] Homing command sent — streaming paused')
+                    else:
+                        print('\n[spacemouse] No socket — skipping homing')
 
+                # LEFT button — per-state advancement (skip if right was pressed)
+                if not right_edge:
+                    if fsm.state == AssemblyState.IDLE:
+                        if left_edge:
+                            fsm.start()
+                            ee_rot = fsm.init_orientation
+                    elif fsm.state == AssemblyState.READY_CONFIRM:
+                        if left_edge:
+                            fsm.confirm()
+                    elif fsm.state in (AssemblyState.CONFIRMED, AssemblyState.ABORTED):
+                        if left_edge:
+                            fsm.reset()
+                    else:
+                        if left_edge:
+                            fsm.advance()
+
+                # Input gating: translation only during allowed stages
+                if fsm.translation_allowed:
+                    ee_pos = np.clip(ee_pos + delta_p, cfg['pos_min'], cfg['pos_max'])
+
+                # Orientation: never from SpaceMouse during assembly
+                rot_override = fsm.rotation_override
+                if rot_override is not None:
+                    ee_rot = rot_override
+
+                # FSM tick — pass sm_lin_delta for manual Q arc control
+                sm_active = float(np.linalg.norm(sm_lin)) > cfg['deadband']
+                fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
+                         sm_lin_delta=delta_p, dt=dt)
+
+                # Position override (auto-lift / arc motion) — no clip, arc is trusted
+                pos_override = fsm.position_override
+                if pos_override is not None:
+                    ee_pos = pos_override
+
+            else:
+                # ── Pure manual mode ───────────────────────────────────────
+                ee_pos = np.clip(ee_pos + delta_p, cfg['pos_min'], cfg['pos_max'])
+
+                if cfg['control_orientation']:
+                    delta_r = (cfg['ang_map'] @ sm_ang) * cfg['angular_speed'] * args.speed * dt
+                    ee_rot = Rotation.from_rotvec(delta_r) * ee_rot
+
+                # IK recovery resync: when arm was stuck at workspace boundary,
+                # snap ee_pos to actual FK on recovery so motion resumes cleanly.
+                if client is not None and not _homing_active:
+                    fb = client.feedback
+                    ik_ok = fb.get('ik_ok', True)   # default True = no freeze
+                    if _ik_was_failing and ik_ok and 'fk_x' in fb:
+                        ee_pos = np.clip(
+                            np.array([fb['fk_x'], fb['fk_y'], fb['fk_z']]),
+                            cfg['pos_min'], cfg['pos_max'])
+                        _ik_was_failing = False
+                        print('[spacemouse] IK recovered — resynced to FK')
+                    elif not ik_ok:
+                        _ik_was_failing = True
+
+                # LEFT → reset to home
+                if left_edge:
+                    ee_pos = cfg['init_pos'].copy()
+                    ee_rot = Rotation.from_quat(cfg['init_quat'])
+                    print('[spacemouse] Reset to home')
+
+                # RIGHT → trigger homing node via TCP
+                if right_edge and not _homing_active:
+                    if client is not None:
+                        client.send_home()
+                        _homing_active       = True
+                        _homing_seen_running = False
+                        _homing_t            = time.monotonic()
+                        print('\n[spacemouse] Homing command sent — streaming paused')
+                    else:
+                        print('[spacemouse] No socket — skipping homing')
+
+            # ── Homing monitor — driven by FK feedback homing flag ───────────
+            if _homing_active and client is not None:
+                fb      = client.feedback
+                homing  = fb.get('homing', False)
+                elapsed = time.monotonic() - _homing_t
+                if homing:
+                    _homing_seen_running = True
+                # Transition: seen running → no longer running → resync
+                if _homing_seen_running and not homing:
+                    ee_rot = Rotation.from_quat(cfg['init_quat'])
+                    if 'fk_x' in fb:
+                        ee_pos = np.array([fb['fk_x'], fb['fk_y'], fb['fk_z']])
+                        print(f'\n[spacemouse] Homing done — resynced to FK: {ee_pos}')
+                    else:
+                        ee_pos = cfg['init_pos'].copy()
+                        print('\n[spacemouse] Homing done — no FK, reset to init_pos')
+                    _homing_active  = False
+                    _arm_ready      = True
+                    _ik_was_failing = False
+                elif elapsed > 15.0:
+                    ee_pos = cfg['init_pos'].copy()
+                    ee_rot = Rotation.from_quat(cfg['init_quat'])
+                    _homing_active  = False
+                    _arm_ready      = True
+                    _ik_was_failing = False
+                    print('\n[spacemouse] Homing timeout — reset to init_pos')
+
+            # ── Send pose (skipped until arm is ready and while homing) ─────────
+            if _arm_ready and not _homing_active:
+                quat = ee_rot.as_quat()
+                if client is not None:
+                    client.send_pose(
+                        x=float(ee_pos[0]),  y=float(ee_pos[1]),  z=float(ee_pos[2]),
+                        qx=float(quat[0]),   qy=float(quat[1]),
+                        qz=float(quat[2]),   qw=float(quat[3]),
+                    )
+
+            # ── Display ────────────────────────────────────────────────────
             if tick % print_every == 0:
-                render_pose(ee_pos, sm_ang, cfg['pos_min'], cfg['pos_max'],
-                            cfg['init_pos'], first=(tick == 0))
+                _fb = client.feedback if client is not None else {}
+                if not _arm_ready and not _homing_active:
+                    print('\r[spacemouse] Waiting — press RIGHT to home and start   ',
+                          end='', flush=True)
+                elif _homing_active:
+                    print(f'\r[spacemouse] HOMING...   ', end='', flush=True)
+                elif fsm is not None:
+                    render_assembly(fsm, ee_pos, asm_cfg.difficulty,
+                                    asm_cfg.q_target_deg, _fb, first=(tick == 0))
+                else:
+                    render_pose(ee_pos, sm_ang, cfg['pos_min'], cfg['pos_max'],
+                                cfg['init_pos'], _fb, first=(tick == 0))
 
             tick += 1
 

@@ -162,7 +162,7 @@ class UartBridgeNode(Node):
         self._ser_to    = ser_to
         self._reconnect_warn_t: float = 0.0  # throttle reconnect log spam
         self._port_open_t: float = 0.0       # monotonic time when port first opened
-        self._tx_gate_timeout = p('tx_gate_timeout_s', 3.0)  # send even without encoder data
+        self._tx_gate_timeout = p('tx_gate_timeout_s', 1.0)  # send even without encoder data
 
         if not self._port:
             self.get_logger().error(
@@ -371,16 +371,25 @@ class UartBridgeNode(Node):
                 self._js_pub.publish(js)
 
             # Idle hold: no active trajectory and command is stale.
-            # Priority: last commanded position → real encoder position.
-            # Never fall back to hw if we haven't received encoder data yet —
-            # hw is initialised to zeros and would snap the arm to zero.
+            # Priority: last commanded position → real encoder position → zeros.
+            # Zeros are only used after tx_gate_timeout expires (gate above already
+            # blocked TX until then).  The MCU's 500 ms bumpless-enable holdoff
+            # protects the arm: it ignores cmd_target_deg until encoder data
+            # arrives via the RX path.  Without this fallback, the gate logs
+            # "sending TX anyway" but the idle-hold immediately cancels it with
+            # a `continue`, so the MCU never receives any frame and last_valid_rx_tick
+            # stays 0 — bumpless enable never fires.
             if not active and age > self._cmd_to:
                 if cmd is not None:
                     hold_pos = [cmd.get(n, 0.0) for n in self._joints]
                 elif got:
                     hold_pos = hw
                 else:
-                    continue  # no command and no encoder data — skip TX
+                    # No cmd and no encoder data: use zeros.
+                    # We only reach here after tx_gate_timeout (gate above).
+                    # MCU holdoff (500 ms) prevents snap-to-zero; encoder data
+                    # will arrive shortly and override these placeholder frames.
+                    hold_pos = [0.0] * len(self._joints)
                 cmd = dict(zip(self._joints, hold_pos))
                 with self._lock:
                     self._cmd, self._cmd_t = cmd, time.monotonic()

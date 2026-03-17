@@ -1,0 +1,47 @@
+assembly:
+  # ── Task parameters ────────────────────────────────────────────────────────
+  difficulty: 3              # 1 / 2 / 3 / 4
+  q_target_deg: 45.0         # Q-arc angle for difficulty 3/4 (degrees)
+
+  # ── Initial EE orientation ─────────────────────────────────────────────────
+  # At task start, EE x-axis → world +Z (pointing up to hold energy unit).
+  # Positive value = pitch up (EE x rotates toward +Z).
+  init_pitch_deg: 90.0
+
+  # ── Auto-motion speed ──────────────────────────────────────────────────────
+  rotation_speed_deg_s: 30.0      # degrees/second for arc motions
+
+  # ── Auto-lift (LIFT stage) ─────────────────────────────────────────────────
+  lift_distance_mm: 100.0         # straight +Z travel
+  lift_speed_m_s: 0.05            # m/s  (100mm in 2s)
+
+  # ── P arc: 90° pitch ───────────────────────────────────────────────────────
+  # EE x-axis stays tangent to a circle of radius 85mm.
+  # Radius = half the energy unit length (gripping at center).
+  # All vectors are in EE frame at the moment the arc begins — they are
+  # transformed to world frame at runtime, so a different approach yaw is
+  # automatically followed.
+  #   pivot  = -EE z  (85mm behind EE in its own Z)
+  #   axis   = +EE y  (pitch about EE y: axis × offset = [0,1,0]×[0,0,+r] = [r,0,0] = EE x ✓)
+  p_arc_radius_mm: 85.0
+  p_arc_angle_deg: 90.0
+  p_arc_center_dir_ee: [0.0, 0.0, -1.0]   # EE-frame direction from EE to pivot
+  p_arc_axis_ee:       [0.0, 1.0,  0.0]   # EE-frame rotation axis (EE y = pitch)
+
+  # ── Q arc: manual roll sweep — EE at TOP of circle ────────────────────────
+  # After P arc, EE z → world +Z.  Pivot at -EE z puts it 60mm BELOW the EE,
+  # so the EE starts at the TOP of the circle.  As the arc sweeps left/right,
+  # world Z decreases (EE descends toward the pivot level).
+  #   pivot  = -EE z  (60mm below EE along its own z-axis)
+  #   axis   = +EE x  (roll about EE x: axis × offset = ê_x × [0,0,+r] = [0,-r,0] = -ê_y)
+  #   tangent = -EE y  (EE sweeps right → world -Y when arc angle increases)
+  # Controlled manually: SpaceMouse left/right drives the arc angle.
+  # LEFT button advances out of this stage when satisfied.
+  q_arc_radius_mm: 60.0
+  q_arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to pivot (-EE z)
+  q_arc_axis_ee:       [1.0, 0.0, 0.0]   # EE-frame rotation axis (EE x = roll)
+
+  # ── Confirmation gating ────────────────────────────────────────────────────
+  stability_hold_s: 0.5
+  stability_threshold_m: 0.003
+  confirm_cooldown_s: 1.0

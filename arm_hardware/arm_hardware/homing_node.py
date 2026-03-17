@@ -5,22 +5,22 @@ homing_node — moves arm joints to 0 rad in a safe, collision-aware order.
 Homing groups are chosen dynamically based on Joint2's current angle:
 
   J2 ≥ 0 (arm leaning forward):
-    [J2]  →  [J3, J4, J5, J6]  →  [J1]
-    Retract shoulder first to clear space, then tuck remaining distal
-    joints, finally rotate base home.
+    [J3+J4+J5+J6]  →  [J2]  →  [J1]
+    Tuck all distal joints simultaneously first, then retract shoulder,
+    finally rotate base home.
 
   J2 < 0 (arm leaning back):
-    [J3]  →  [J2]  →  [J4, J5, J6]  →  [J1]
-    Fold elbow first (avoids collision with body when shoulder is back),
-    then retract shoulder, then wrist + base.
+    [J2+J4+J5+J6]  →  [J3]  →  [J1]
+    Retract shoulder + wrist simultaneously, then fold elbow,
+    finally rotate base home.
 
 Within each group all listed joints move simultaneously; groups execute
 sequentially.
 
 Parameters:
-  joint_speed_rad_s  — max joint speed used to compute step duration (default: 0.3)
-  min_duration_s     — minimum time for any single group (default: 2.0 s)
-  settle_time_s      — extra wait after each group for mechanical settling (default: 0.5 s)
+  joint_speed_rad_s  — max joint speed used to compute step duration (default: 0.5)
+  min_duration_s     — minimum time for any single group (default: 1.0 s)
+  settle_time_s      — extra wait after each group for mechanical settling (default: 0.2 s)
 
 Usage:
   # Standalone (recommended — run before starting teleop/vision):
@@ -48,15 +48,14 @@ _ALL_JOINTS = ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6']
 
 # ── Homing group sequences (chosen at runtime based on J2 angle) ─────────────
 _GROUPS_J2_NEG = [
-    ['Joint2'],                              # retract shoulder first
-    ['Joint3', 'Joint4', 'Joint5', 'Joint6'],  # tuck distal joints
-    ['Joint1'],                              # base rotation last
+    ['Joint2', 'Joint4', 'Joint5', 'Joint6'],  # retract shoulder + wrist simultaneously
+    ['Joint3'],                                 # fold elbow
+    ['Joint1'],                                 # base rotation last
 ]
 _GROUPS_J2_POS = [
-    ['Joint3'],                              # fold elbow first (avoid body)
-    ['Joint2'],                              # then retract shoulder
-    ['Joint4', 'Joint5', 'Joint6'],          # wrist joints
-    ['Joint1'],                              # base rotation last
+    ['Joint3', 'Joint4', 'Joint5', 'Joint6'],  # tuck all distal joints simultaneously
+    ['Joint2'],                                 # retract shoulder
+    ['Joint1'],                                 # base rotation last
 ]
 
 # ── Action server (JointTrajectoryController standard naming) ──────────────────
@@ -68,9 +67,9 @@ class HomingNode(Node):
     def __init__(self) -> None:
         super().__init__('homing_node')
 
-        self.declare_parameter('joint_speed_rad_s', 0.3)
-        self.declare_parameter('min_duration_s', 2.0)
-        self.declare_parameter('settle_time_s', 0.5)
+        self.declare_parameter('joint_speed_rad_s', 0.5)
+        self.declare_parameter('min_duration_s', 1.0)
+        self.declare_parameter('settle_time_s', 0.2)
 
         self._speed   = float(self.get_parameter('joint_speed_rad_s').value)
         self._min_dur = float(self.get_parameter('min_duration_s').value)

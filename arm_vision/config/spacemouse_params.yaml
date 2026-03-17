@@ -1,6 +1,6 @@
 spacemouse:
-  # Starting EE position (m) in base_link — matches workspace.yaml ee_origin
-  init_pos: [0.426, 0.0, 0.395]
+  # Starting EE position (m) in base_link — FK at all-zero joints
+  init_pos: [0.5261, 0.0, 0.3960]
   init_quat: [0.0, 0.0, 0.0, 1.0] # [x, y, z, w]
 
   # Speed at full SpaceMouse deflection (±1.0)

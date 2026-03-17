@@ -39,6 +39,7 @@ import csv
 import json
 import os
 import socket
+import subprocess
 import threading
 import time
 from typing import Optional
@@ -257,6 +258,10 @@ class IkTeleopNode(Node):
         self._last_recv_time: float = 0.0
         self._last_solved_joints: Optional[list] = None
 
+        # ── FK feedback (written by control loop, read by feedback sender) ────
+        self._fk_feedback: dict = {}
+        self._fk_feedback_lock = threading.Lock()
+
         # ── /joint_states subscriber ──────────────────────────────────────────
         self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
 
@@ -401,6 +406,10 @@ class IkTeleopNode(Node):
 
     def _handle_client(self, conn: socket.socket, addr):
         buf = ''
+        # Spawn feedback sender — writes FK state back to the Mac at ~10 Hz
+        fb_thread = threading.Thread(
+            target=self._feedback_sender, args=(conn,), daemon=True)
+        fb_thread.start()
         with conn:
             conn.settimeout(1.0)
             while rclpy.ok():
@@ -416,17 +425,50 @@ class IkTeleopNode(Node):
                 while '\n' in buf:
                     line, buf = buf.split('\n', 1)
                     self._parse_message(line.strip())
+        # Clear stale feedback so next client doesn't see old state
+        with self._fk_feedback_lock:
+            self._fk_feedback = {}
         self.get_logger().info(f'arm_vision disconnected: {addr}')
         with self._lock:
             self._target_pos         = None
             self._target_quat        = None
             self._last_solved_joints = None
 
+    def _feedback_sender(self, conn: socket.socket):
+        """Send FK feedback to the Mac at ~10 Hz on the existing TCP connection.
+
+        Runs in a daemon thread spawned per client connection.  Dies silently
+        when the connection is closed (OSError from sendall).
+        """
+        while True:
+            time.sleep(0.1)
+            with self._fk_feedback_lock:
+                fb = dict(self._fk_feedback)
+            if not fb:
+                continue
+            try:
+                conn.sendall((json.dumps(fb) + '\n').encode('utf-8'))
+            except OSError:
+                break
+
     def _parse_message(self, line: str):
         if not line:
             return
         try:
-            msg  = json.loads(line)
+            msg = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warn(f'Bad socket message: {exc}')
+            return
+
+        # ── Command messages ─────────────────────────────────────────────────
+        if 'cmd' in msg:
+            if msg['cmd'] == 'home':
+                self.get_logger().info('Homing command received via TCP')
+                threading.Thread(target=self._run_homing, daemon=True).start()
+            return   # not a pose message
+
+        # ── Pose message ─────────────────────────────────────────────────────
+        try:
             pos  = np.array([float(msg['x']),  float(msg['y']),  float(msg['z'])])
             quat = np.array([float(msg['qx']), float(msg['qy']),
                              float(msg['qz']), float(msg['qw'])])
@@ -438,8 +480,48 @@ class IkTeleopNode(Node):
                 self._target_pos     = pos
                 self._target_quat    = quat
                 self._last_recv_time = time.monotonic()
-        except (KeyError, ValueError, json.JSONDecodeError) as exc:
-            self.get_logger().warn(f'Bad socket message: {exc}')
+        except (KeyError, ValueError) as exc:
+            self.get_logger().warn(f'Bad pose message: {exc}')
+
+    def _run_homing(self):
+        """Spawn homing_node locally (Linux side) and report status via FK feedback."""
+        self.get_logger().info('Homing: starting...')
+        # Mark homing active in feedback so Mac side pauses streaming
+        with self._fk_feedback_lock:
+            fb = dict(self._fk_feedback)
+            fb['homing'] = True
+            self._fk_feedback = fb
+        try:
+            result = subprocess.run(
+                ['ros2', 'run', 'arm_hardware', 'homing_node'],
+                timeout=30,
+            )
+            self.get_logger().info(f'Homing done (exit {result.returncode})')
+        except subprocess.TimeoutExpired:
+            self.get_logger().error('Homing timed out (30 s)')
+        except Exception as exc:
+            self.get_logger().error(f'Homing failed: {exc}')
+        finally:
+            # Read current joint state (after homing) to compute post-home FK
+            with self._lock:
+                js = dict(self._joint_pos)
+            with self._fk_feedback_lock:
+                fb = dict(self._fk_feedback)
+                fb.pop('homing', None)
+                # Provide post-home FK so Mac can resync ee_pos immediately
+                if self._chain_data and js:
+                    try:
+                        q = np.array([js.get(n, 0.0) for n in self._joint_names])
+                        p_home, _, _ = _fk_and_jac(self._chain_data, q)
+                        fb.update({
+                            'fk_x': float(p_home[0]),
+                            'fk_y': float(p_home[1]),
+                            'fk_z': float(p_home[2]),
+                            'ik_ok': True,
+                        })
+                    except Exception:
+                        pass
+                self._fk_feedback = fb
 
     # ── IK solvers ────────────────────────────────────────────────────────────
 
@@ -880,6 +962,14 @@ class IkTeleopNode(Node):
                 t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
                 target_pos, raw_quat, target_quat,
                 'FAIL', '', None, False, None, js_seed)
+            # Feedback: IK failed — include last known FK so Mac can resync boundary
+            _fb: dict = {'ik_ok': False}
+            if last_solved is not None:
+                _p, _, _ = _fk_and_jac(self._chain_data, np.array(last_solved))
+                _fb.update({'fk_x': float(_p[0]), 'fk_y': float(_p[1]),
+                            'fk_z': float(_p[2])})
+            with self._fk_feedback_lock:
+                self._fk_feedback = _fb
             return
 
         # ── Joint-space velocity limiting ─────────────────────────────────
@@ -929,6 +1019,16 @@ class IkTeleopNode(Node):
         with self._lock:
             self._last_solved_joints = list(result)
         self._diag_solves += 1
+
+        # Feedback: FK position of solved joints + IK quality flag
+        _p_sol, _, _ = _fk_and_jac(self._chain_data, np.array(result))
+        with self._fk_feedback_lock:
+            self._fk_feedback = {
+                'fk_x': float(_p_sol[0]),
+                'fk_y': float(_p_sol[1]),
+                'fk_z': float(_p_sol[2]),
+                'ik_ok': not used_snap,   # False when arm snapped to nearest reachable
+            }
 
         # Determine result type label for CSV
         if pos_only_fallback:
