@@ -480,6 +480,9 @@ class IkTeleopNode(Node):
         if 'cmd' in msg:
             if msg['cmd'] == 'home':
                 self.get_logger().info('Homing command received via TCP')
+                with self._lock:
+                    self._target_pos  = None   # stop IK loop from commanding old target
+                    self._target_quat = None
                 threading.Thread(target=self._run_homing, daemon=True).start()
             return   # not a pose message
 

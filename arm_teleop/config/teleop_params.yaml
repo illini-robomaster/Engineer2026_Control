@@ -42,8 +42,9 @@ ik_teleop_node:
     traj_duration_s: 0.033   # 33 ms ~= 1x the 60 Hz period
 
     # Suppress IK re-solve when the commanded joints change by less than this.
-    # Prevents micro-jitter from reaching the hardware.
-    joint_deadband_rad: 0.002
+    # Keep this small enough to preserve fine alignment once pose_alpha smoothing
+    # is active, while still blocking encoder-noise chatter.
+    joint_deadband_rad: 0.005
 
     # Reject IK solutions where any single joint would move more than this from
     # the current hardware position.  Catches configuration flips (e.g. J4 ±180°
@@ -55,11 +56,11 @@ ik_teleop_node:
 
     # Joint-space velocity limit (rad/s per joint).  When IK re-acquires a
     # solution after traversing an unreachable zone, the arm ramps smoothly
-    # to the new target instead of snapping.  At 60 Hz, 4.0 rad/s allows
-    # 0.067 rad/tick — fast enough for normal tracking, but catches violent
-    # snaps (>230°/s).  Previous 2.0 rad/s throttled 33-75% of normal ticks.
+    # to the new target instead of snapping.  Keep this aligned with the
+    # slowest declared joint max_velocity (3.0 rad/s) for conservative
+    # behaviour on hardware.
     # Set 0.0 to disable.
-    max_joint_vel_rad_s: 4.0
+    max_joint_vel_rad_s: 3.0
 
     # Halt if no TCP message received for this long (s).
     detection_timeout_s: 0.4
@@ -93,17 +94,23 @@ ik_teleop_node:
     # worst-case per control tick (still well within the 16 ms budget at 60 Hz).
     n_random_seeds: 15
 
+    # EMA smoothing on incoming target pose (0.0 = static, 1.0 = no smoothing).
+    # Reduces wrist-joint shaking caused by IK noise on small position perturbations.
+    pose_alpha: 0.4
+
     # Per-tick CSV debug log.  Set to a file path to enable (e.g. "/tmp/ik_debug.csv").
     # Captures target pose, IK result, joints, FK, orientation error per axis.
     # Leave empty to disable.
     debug_log: ""
 
-    # Null-space posture control: secondary objective to keep joints near preferred
-    # angles without disturbing the primary EE position task.
+    # Null-space posture control: secondary objective to keep joints near a
+    # mid-range "elbow-up" posture without disturbing the primary EE position task.
+    # Also biases pick_best seed selection away from straight-arm and wrist-flip
+    # configurations when multiple IK branches are valid.
     # Only has effect in position-only mode (3D task, 6 joints → 3D null space).
     # Set nullspace_gain: 0.0 to disable.
     nullspace_gain: 0.5
-    q_preferred: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # radians; J4=0 prevents wrist limit accumulation
+    q_preferred: [0.0, 0.3, 1.5, 0.0, 0.0, 0.0]   # radians; keeps elbow off the zero-pose singular region
 
     joint_names:
       - Joint1

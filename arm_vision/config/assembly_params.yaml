@@ -31,10 +31,14 @@ assembly:
   # automatically followed.
   #   pivot  = -EE z  (85mm behind EE in its own Z)
   #   axis   = +EE y  (pitch about EE y: axis × offset = [0,1,0]×[0,0,+r] = [r,0,0] = EE x ✓)
-  p_arc_radius_mm: 40.0
+  # Pivot is 160mm along EE -z AND 108mm along EE -x (handle sits 108mm below
+  # the point perpendicular to the arc tangent).
+  # radius = sqrt(160² + 108²) = 193 mm
+  # center_dir = normalize([-108, 0, -160])
+  p_arc_radius_mm: 110.0
   p_arc_angle_deg: 90.0
-  p_arc_center_dir_ee: [0.0, 0.0, -1.0]   # EE-frame direction from EE to pivot
-  p_arc_axis_ee:       [0.0, 1.0,  0.0]   # EE-frame rotation axis (EE y = pitch)
+  p_arc_center_dir_ee: [-0.5595, 0.0, -0.8288]  # EE-frame direction from EE to pivot
+  p_arc_axis_ee:       [0.0, 1.0,  0.0]          # EE-frame rotation axis (EE y = pitch)
 
   # ── Q arc: manual roll sweep — EE at TOP of circle ────────────────────────
   # After P arc, EE z → world +Z.  Pivot at -EE z puts it 60mm BELOW the EE,

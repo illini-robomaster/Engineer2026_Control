@@ -510,16 +510,16 @@ class AssemblyFSM:
             ramp = Rotation.from_euler('y', -delta_pitch, degrees=True)
             self._current_rot = ramp * self._current_rot
 
-        # All three SpaceMouse axes — small incremental steps in EE frame.
-        # Right-multiply so SpaceMouse roll/pitch/yaw rotate around the EE's
-        # own axes, not the world axes.  This makes pitch feel correct even
-        # when the wrist is pitched 90° (EE x → world Z).
-        self._current_rot = self._current_rot * Rotation.from_rotvec(sm_rot_delta)
+        # World-frame left-multiply — identical to manual mode.
+        # Because the EE is pitched 90° (EE x → world Z), the same physical
+        # SpaceMouse gestures naturally produce the right rotations:
+        #   sm.roll  (tilt L/R)  → world X  (tips the insertion axis sideways)
+        #   sm.pitch (tilt F/B)  → world Y  (tips the insertion axis fwd/back)
+        #   sm.yaw   (twist)     → world -Z (spins around the vertical/insertion axis)
+        self._current_rot = Rotation.from_rotvec(sm_rot_delta) * self._current_rot
 
-        # Track roll channel for yaw display.  With EE-frame rotation and
-        # pitch≈90° (EE x → world Z), SpaceMouse roll = rotation around EE x
-        # = rotation around world Z = effective world yaw.
-        self._approach_yaw_deg += np.degrees(sm_rot_delta[0])
+        # Track yaw: world-Z rotation is driven by sm_rot_delta[2] (= -sm.yaw via ang_map).
+        self._approach_yaw_deg += np.degrees(sm_rot_delta[2])
 
     def _tick_auto_lift(self, ee_pos: np.ndarray, ee_rot: Rotation,
                         dt: float) -> None:
