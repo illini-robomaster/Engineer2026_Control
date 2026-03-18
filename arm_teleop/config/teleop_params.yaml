@@ -94,9 +94,15 @@ ik_teleop_node:
     # worst-case per control tick (still well within the 16 ms budget at 60 Hz).
     n_random_seeds: 15
 
-    # EMA smoothing on incoming target pose (0.0 = static, 1.0 = no smoothing).
-    # Reduces wrist-joint shaking caused by IK noise on small position perturbations.
-    pose_alpha: 0.4
+    # Velocity-adaptive EMA smoothing on incoming target pose.
+    # pose_alpha:           alpha when stationary (suppress IK-noise jitter). 0.4 = heavy.
+    # pose_alpha_moving:    alpha when moving fast (pass-through, no lag). 0.9 = light.
+    # pose_alpha_threshold_m: per-tick Δpos (m) above which full moving-alpha is used.
+    #   At 60 Hz, 0.002 m/tick ≈ 0.12 m/s — any deliberate SpaceMouse motion exceeds this.
+    # Result: no lag during motion; jitter suppressed when hand is still.
+    pose_alpha:             0.4
+    pose_alpha_moving:      0.9
+    pose_alpha_threshold_m: 0.002
 
     # Per-tick CSV debug log.  Set to a file path to enable (e.g. "/tmp/ik_debug.csv").
     # Captures target pose, IK result, joints, FK, orientation error per axis.

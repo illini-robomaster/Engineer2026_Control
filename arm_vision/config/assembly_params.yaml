@@ -24,21 +24,13 @@ assembly:
   lift_axis_ee: [1.0, 0.0, 0.0]
 
   # ── P arc: 90° pitch ───────────────────────────────────────────────────────
-  # EE x-axis stays tangent to a circle of radius 85mm.
-  # Radius = half the energy unit length (gripping at center).
-  # All vectors are in EE frame at the moment the arc begins — they are
-  # transformed to world frame at runtime, so a different approach yaw is
-  # automatically followed.
-  #   pivot  = -EE z  (85mm behind EE in its own Z)
-  #   axis   = +EE y  (pitch about EE y: axis × offset = [0,1,0]×[0,0,+r] = [r,0,0] = EE x ✓)
-  # Pivot is 160mm along EE -z AND 108mm along EE -x (handle sits 108mm below
-  # the point perpendicular to the arc tangent).
-  # radius = sqrt(160² + 108²) = 193 mm
-  # center_dir = normalize([-108, 0, -160])
-  p_arc_radius_mm: 110.0
+  # Pivot sits on EE −x axis (= world −Z at pitch=90°), 60 mm below EE tip.
+  # Handle (grip point) is 108 mm below EE tip → 48 mm below pivot.
+  # Handle arc radius = 48 mm.
+  p_arc_radius_mm: 50.0
   p_arc_angle_deg: 90.0
-  p_arc_center_dir_ee: [-0.5595, 0.0, -0.8288]  # EE-frame direction from EE to pivot
-  p_arc_axis_ee:       [0.0, 1.0,  0.0]          # EE-frame rotation axis (EE y = pitch)
+  p_arc_center_dir_ee: [-1.0, 0.0, 0.0]          # EE −x: pivot straight below EE
+  p_arc_axis_ee:       [0.0, 1.0,  0.0]           # EE-frame rotation axis (EE y = pitch)
 
   # ── Q arc: manual roll sweep — EE at TOP of circle ────────────────────────
   # After P arc, EE z → world +Z.  Pivot at -EE z puts it 60mm BELOW the EE,

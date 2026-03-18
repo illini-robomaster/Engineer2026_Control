@@ -258,13 +258,17 @@ class IkTeleopNode(Node):
         _q_pref_list         = p('q_preferred',    [0.0] * 6)
         self._q_preferred    = np.array(_q_pref_list, dtype=float)
 
-        # ── Target pose EMA smoothing ─────────────────────────────────────────
-        # Reduces overshoot by low-pass filtering the incoming target pose.
-        # alpha=1.0 → no smoothing (raw); alpha=0.3 → heavy smoothing (slow).
-        # Applied per-tick in the control loop before IK solve.
-        self._pose_alpha = p('pose_alpha', 1.0)
+        # ── Target pose EMA smoothing (velocity-adaptive) ────────────────────
+        # pose_alpha:         alpha used when target is stationary (suppress IK noise).
+        # pose_alpha_moving:  alpha used when target is moving fast (pass-through, no lag).
+        # Blends linearly between the two based on per-tick position delta magnitude.
+        # alpha=1.0 → raw (no smoothing); alpha<1.0 → low-pass (lag proportional to 1-alpha).
+        self._pose_alpha          = p('pose_alpha',          1.0)
+        self._pose_alpha_moving   = p('pose_alpha_moving',   0.9)
+        self._pose_alpha_threshold_m = p('pose_alpha_threshold_m', 0.002)
         self._smoothed_pos:  Optional[np.ndarray] = None
         self._smoothed_quat: Optional[np.ndarray] = None
+        self._prev_raw_pos:  Optional[np.ndarray] = None
 
         # ── Shared state ─────────────────────────────────────────────────────
         self._lock               = threading.Lock()
@@ -886,13 +890,21 @@ class IkTeleopNode(Node):
             if age > self._det_timeout:
                 self._smoothed_pos  = None
                 self._smoothed_quat = None
+                self._prev_raw_pos  = None
             return
 
-        # ── EMA smoothing on target pose ──────────────────────────────────────
-        # Damps overshoot from SpaceMouse spring rebound or rapid hand motion.
-        # alpha=1.0 passes the raw pose through unchanged.
-        if self._pose_alpha < 1.0:
-            a = self._pose_alpha
+        # ── EMA smoothing on target pose (velocity-adaptive) ─────────────────
+        # When the target is moving fast → alpha ramps toward pose_alpha_moving
+        #   (near 1.0) so the arm tracks without lag.
+        # When the target is stationary → alpha = pose_alpha (heavy smoothing)
+        #   to suppress IK-noise jitter.
+        # Blend is linear in per-tick position delta scaled by pose_alpha_threshold_m.
+        raw_delta = (float(np.linalg.norm(target_pos - self._prev_raw_pos))
+                     if self._prev_raw_pos is not None else 0.0)
+        self._prev_raw_pos = target_pos.copy()
+        if self._pose_alpha < 1.0 or self._pose_alpha_moving < 1.0:
+            t = min(raw_delta / max(self._pose_alpha_threshold_m, 1e-9), 1.0)
+            a = (1.0 - t) * self._pose_alpha + t * self._pose_alpha_moving
             if self._smoothed_pos is None:
                 self._smoothed_pos  = target_pos.copy()
                 self._smoothed_quat = target_quat.copy() if target_quat is not None else None

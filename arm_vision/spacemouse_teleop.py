@@ -174,6 +174,74 @@ def render_pickup(
         print(line.ljust(width))
 
 
+# ── P-arc recording analysis ─────────────────────────────────────────────────
+
+def analyze_p_arc(
+    log: list,
+    start_pos: 'np.ndarray',
+    start_rot: 'Rotation',
+    handle_offset_ee_mm: 'np.ndarray | None' = None,
+) -> None:
+    """Fit a circle to the recorded handle path and print derived P-arc params.
+
+    *log* is a list of (ee_pos, ee_rot) captured while the user drew the arc.
+    The circle is fit in the world XZ plane (P arc rotates about world Y).
+    """
+    if handle_offset_ee_mm is None:
+        handle_offset_ee_mm = np.array([-108.0, 0.0, 0.0])  # default: 108 mm below EE
+
+    if len(log) < 10:
+        print('[P-ARC] Too few points (<10) — move more during recording.')
+        return
+
+    h_off = handle_offset_ee_mm / 1000.0
+    handles = np.array([pos + rot.apply(h_off) for pos, rot in log])
+
+    # Algebraic circle fit in XZ plane: (x-cx)^2 + (z-cz)^2 = r^2
+    # Rearranges to linear system: [2x, 2z, 1] [cx; cz; r^2-cx^2-cz^2] = x^2+z^2
+    X, Z = handles[:, 0], handles[:, 2]
+    A = np.column_stack([2.0 * X, 2.0 * Z, np.ones(len(X))])
+    b = X ** 2 + Z ** 2
+    coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    cx, cz = float(coeffs[0]), float(coeffs[1])
+    r_handle_m = float(np.sqrt(max(0.0, coeffs[2] + cx ** 2 + cz ** 2)))
+    pivot = np.array([cx, float(np.mean(handles[:, 1])), cz])
+
+    # Fit quality: std-dev of residuals
+    dists = np.hypot(handles[:, 0] - cx, handles[:, 2] - cz)
+    residual_mm = float(np.std(dists) * 1000.0)
+
+    # EE arc radius + center direction in EE frame
+    c_world = pivot - start_pos
+    ee_radius_mm = float(np.linalg.norm(c_world) * 1000.0)
+    c_dir_ee = start_rot.inv().apply(c_world / (np.linalg.norm(c_world) + 1e-9))
+
+    # Arc angle swept (handle start → handle end around pivot)
+    v0 = handles[0] - pivot
+    v1 = handles[-1] - pivot
+    cos_a = float(np.dot(v0, v1) / (np.linalg.norm(v0) * np.linalg.norm(v1) + 1e-9))
+    angle_deg = float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
+
+    sep = '=' * 62
+    print(f'\n{sep}')
+    print('[P-ARC RECORD] Analysis')
+    print(f'  Points logged:         {len(log)}')
+    quality = 'good' if residual_mm < 3.0 else ('ok' if residual_mm < 8.0 else 'noisy — try again more steadily')
+    print(f'  Circle-fit residual:   {residual_mm:.2f} mm  ({quality})')
+    print()
+    print(f'  Pivot (world):         [{pivot[0]:+.4f}, {pivot[1]:+.4f}, {pivot[2]:+.4f}]')
+    print(f'  Handle arc radius:     {r_handle_m * 1000:.1f} mm')
+    print(f'  EE arc radius:         {ee_radius_mm:.1f} mm')
+    print(f'  Arc angle swept:       {angle_deg:.1f}°')
+    print(f'  center_dir_ee:         [{c_dir_ee[0]:.4f}, {c_dir_ee[1]:.4f}, {c_dir_ee[2]:.4f}]')
+    print()
+    print('  ── Paste into assembly_params.yaml ──────────────────────')
+    print(f'  p_arc_radius_mm:       {ee_radius_mm:.1f}')
+    print(f'  p_arc_angle_deg:       {angle_deg:.1f}')
+    print(f'  p_arc_center_dir_ee:   [{c_dir_ee[0]:.4f}, {c_dir_ee[1]:.4f}, {c_dir_ee[2]:.4f}]')
+    print(sep)
+
+
 # ── Mode + Button combo ───────────────────────────────────────────────────────
 
 class TeleopMode(Enum):
@@ -255,6 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Override Q-axis target angle (degrees)')
     p.add_argument('--yaw', type=float, default=None,
                    help='Override approach yaw angle (degrees, 0=+X)')
+    p.add_argument('--record-p-arc', action='store_true', dest='record_p_arc',
+                   help='Manually draw the P arc with SpaceMouse to derive arc params')
+    p.add_argument('--handle-offset', type=float, nargs=3,
+                   default=[-108.0, 0.0, 0.0], metavar=('X', 'Y', 'Z'),
+                   help='Handle offset in EE frame mm (default: -108 0 0)')
     return p
 
 
@@ -372,6 +445,14 @@ def main():
 
     combo_detector = ButtonComboDetector()
 
+    # ── P-arc recording state ──────────────────────────────────────────────
+    _p_arc_recording  = False
+    _p_arc_log: list  = []
+    _p_arc_start_pos  = None
+    _p_arc_start_rot  = None
+    _p_arc_prev_state = None
+    _handle_offset_ee = np.array(args.handle_offset, dtype=float)
+
     mode_names = ' / '.join(m.name for m in available_modes)
     print(f'[spacemouse] Modes available: {mode_names}')
     print(f'[spacemouse] BOTH buttons to cycle modes | current: {current_mode.name}')
@@ -448,6 +529,8 @@ def main():
 
                 if _right_for_asm and not _homing_active:
                     asm_fsm.emergency_reset()
+                    _p_arc_recording = False
+                    _p_arc_log = []
                     ee_rot = Rotation.from_quat(cfg['init_quat'])
                     if client is not None:
                         client.send_home()
@@ -458,8 +541,27 @@ def main():
                     else:
                         print('\n[spacemouse] No socket — skipping homing')
 
+                # ── P-arc recording: detect entry into AUTO_ROTATE_P ──────
+                if (args.record_p_arc
+                        and asm_fsm.state == AssemblyState.AUTO_ROTATE_P
+                        and _p_arc_prev_state != AssemblyState.AUTO_ROTATE_P
+                        and not _p_arc_recording):
+                    _p_arc_recording  = True
+                    _p_arc_log        = []
+                    _p_arc_start_pos  = ee_pos.copy()
+                    _p_arc_start_rot  = ee_rot
+                    print('\n[P-ARC RECORD] SpaceMouse active — draw the arc freely.')
+                    print('[P-ARC RECORD] Press LEFT when done to get derived params.')
+                _p_arc_prev_state = asm_fsm.state
+
+                # ── Button handling ───────────────────────────────────────
                 if event == 'LEFT':
-                    if asm_fsm.state == AssemblyState.IDLE:
+                    if _p_arc_recording and asm_fsm.state == AssemblyState.AUTO_ROTATE_P:
+                        _p_arc_recording = False
+                        analyze_p_arc(_p_arc_log, _p_arc_start_pos, _p_arc_start_rot,
+                                      _handle_offset_ee)
+                        asm_fsm.advance()   # AUTO_ROTATE_P is now in _ADVANCEABLE
+                    elif asm_fsm.state == AssemblyState.IDLE:
                         asm_fsm.start()
                     elif asm_fsm.state == AssemblyState.READY_CONFIRM:
                         asm_fsm.confirm()
@@ -469,20 +571,40 @@ def main():
                         asm_fsm.advance()
 
                 spd = asm_fsm.approach_speed_scale
-                if asm_fsm.translation_allowed:
-                    ee_pos = np.clip(ee_pos + delta_p * spd, cfg['pos_min'], cfg['pos_max'])
 
-                rot_override = asm_fsm.rotation_override
-                if rot_override is not None:
-                    ee_rot = rot_override
+                if _p_arc_recording and asm_fsm.state == AssemblyState.AUTO_ROTATE_P:
+                    # Constrained SpaceMouse control for P-arc recording:
+                    #   Translation  → EE x-z plane only (no EE-y drift)
+                    #   Rotation     → EE y-axis only (pitch-like arc rotation)
+                    R_mat  = ee_rot.as_matrix()   # columns: ee_x, ee_y, ee_z in world
+                    ee_x   = R_mat[:, 0]
+                    ee_y   = R_mat[:, 1]
+                    ee_z   = R_mat[:, 2]
+                    dp = delta_p * spd
+                    dr = delta_r * spd
+                    # Project translation onto EE x and EE z (drop EE y component)
+                    dp_constrained = np.dot(dp, ee_x) * ee_x + np.dot(dp, ee_z) * ee_z
+                    # Project rotation onto EE y only
+                    dr_constrained = np.dot(dr, ee_y) * ee_y
+                    ee_pos = np.clip(ee_pos + dp_constrained, cfg['pos_min'], cfg['pos_max'])
+                    ee_rot = Rotation.from_rotvec(dr_constrained) * ee_rot
+                    _p_arc_log.append((ee_pos.copy(), ee_rot))
+                    # Do NOT tick the FSM — keeps the arc from auto-completing
+                else:
+                    if asm_fsm.translation_allowed:
+                        ee_pos = np.clip(ee_pos + delta_p * spd, cfg['pos_min'], cfg['pos_max'])
 
-                sm_active = float(np.linalg.norm(sm_lin)) > cfg['deadband']
-                asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
-                             sm_lin_delta=delta_p * spd, sm_rot_delta=delta_r * spd, dt=dt)
+                    rot_override = asm_fsm.rotation_override
+                    if rot_override is not None:
+                        ee_rot = rot_override
 
-                pos_override = asm_fsm.position_override
-                if pos_override is not None:
-                    ee_pos = pos_override
+                    sm_active = float(np.linalg.norm(sm_lin)) > cfg['deadband']
+                    asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
+                                 sm_lin_delta=delta_p * spd, sm_rot_delta=delta_r * spd, dt=dt)
+
+                    pos_override = asm_fsm.position_override
+                    if pos_override is not None:
+                        ee_pos = pos_override
 
             elif current_mode == TeleopMode.PICKUP and pickup_fsm is not None:
                 from pickup_fsm import PickupState
@@ -562,23 +684,29 @@ def main():
                 if homing:
                     _homing_seen_running = True
                 if _homing_seen_running and not homing:
+                    if 'fk_x' in fb:
+                        # ik_teleop_node atomically clears homing + sets fk_x,
+                        # so this is the authoritative post-home position.
+                        ee_pos = np.array([fb['fk_x'], fb['fk_y'], fb['fk_z']])
+                        ee_rot = Rotation.from_quat(cfg['init_quat'])
+                        print(f'\n[spacemouse] Homing done — resynced to FK: {ee_pos}')
+                        _homing_active  = False
+                        _arm_ready      = True
+                        _ik_was_failing = False
+                    # else: fk_x not yet in feedback — keep waiting this tick;
+                    # the node will send it within the next 100 ms feedback interval.
+                elif elapsed > 15.0:
+                    # Hard timeout: use FK if available, init_pos as last resort.
                     ee_rot = Rotation.from_quat(cfg['init_quat'])
                     if 'fk_x' in fb:
                         ee_pos = np.array([fb['fk_x'], fb['fk_y'], fb['fk_z']])
-                        print(f'\n[spacemouse] Homing done — resynced to FK: {ee_pos}')
+                        print(f'\n[spacemouse] Homing timeout — resynced to FK: {ee_pos}')
                     else:
                         ee_pos = cfg['init_pos'].copy()
-                        print('\n[spacemouse] Homing done — no FK, reset to init_pos')
+                        print('\n[spacemouse] Homing timeout — no FK, reset to init_pos')
                     _homing_active  = False
                     _arm_ready      = True
                     _ik_was_failing = False
-                elif elapsed > 15.0:
-                    ee_pos = cfg['init_pos'].copy()
-                    ee_rot = Rotation.from_quat(cfg['init_quat'])
-                    _homing_active  = False
-                    _arm_ready      = True
-                    _ik_was_failing = False
-                    print('\n[spacemouse] Homing timeout — reset to init_pos')
 
             # ── Send pose ─────────────────────────────────────────────────
             if _arm_ready and not _homing_active:
@@ -597,7 +725,10 @@ def main():
                 if _right_hold_t is not None and not _right_hold_fired:
                     remaining = max(0.0, HOMING_HOLD_S - (now - _right_hold_t))
                     hold_hint = f'  [HOME in {remaining:.1f}s]'
-                mode_hdr = f'  [{current_mode.name}]  (BOTH to switch){hold_hint}'
+                if _p_arc_recording:
+                    mode_hdr = f'  [P-ARC RECORD] {len(_p_arc_log)} pts logged — LEFT to finish'
+                else:
+                    mode_hdr = f'  [{current_mode.name}]  (BOTH to switch){hold_hint}'
 
                 if not _arm_ready and not _homing_active:
                     print('\r[spacemouse] Waiting — press RIGHT to home and start   ',

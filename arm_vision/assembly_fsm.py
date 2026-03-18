@@ -51,6 +51,7 @@ _TRANSLATION_ALLOWED = frozenset({
 _ADVANCEABLE = frozenset({
     AssemblyState.APPROACH,
     AssemblyState.INSERT,
+    AssemblyState.AUTO_ROTATE_P,   # LEFT to finish when in record-p-arc mode
     AssemblyState.AUTO_ROTATE_Q,   # manual arc: LEFT when satisfied
     AssemblyState.RELEASE,         # LEFT when withdrawn far enough
 })
