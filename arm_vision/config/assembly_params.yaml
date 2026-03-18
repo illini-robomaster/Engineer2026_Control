@@ -14,6 +14,7 @@ assembly:
   # ── Auto-motion speed ──────────────────────────────────────────────────────
   rotation_speed_deg_s: 30.0      # degrees/second for arc motions
   approach_orient_speed_deg_s: 45.0  # degrees/second for initial orientation transition
+  approach_speed_scale: 0.4          # SpaceMouse speed multiplier during APPROACH (1.0 = normal)
 
   # ── Auto-lift (LIFT stage) ─────────────────────────────────────────────────
   lift_distance_mm: 100.0

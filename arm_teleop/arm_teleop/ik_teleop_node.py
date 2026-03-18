@@ -258,6 +258,14 @@ class IkTeleopNode(Node):
         _q_pref_list         = p('q_preferred',    [0.0] * 6)
         self._q_preferred    = np.array(_q_pref_list, dtype=float)
 
+        # ── Target pose EMA smoothing ─────────────────────────────────────────
+        # Reduces overshoot by low-pass filtering the incoming target pose.
+        # alpha=1.0 → no smoothing (raw); alpha=0.3 → heavy smoothing (slow).
+        # Applied per-tick in the control loop before IK solve.
+        self._pose_alpha = p('pose_alpha', 1.0)
+        self._smoothed_pos:  Optional[np.ndarray] = None
+        self._smoothed_quat: Optional[np.ndarray] = None
+
         # ── Shared state ─────────────────────────────────────────────────────
         self._lock               = threading.Lock()
         self._joint_pos: dict    = {}
@@ -871,7 +879,28 @@ class IkTeleopNode(Node):
             joint_pos    = dict(self._joint_pos)
 
         if target_pos is None or age > self._det_timeout:
+            # Reset smoother on timeout so it doesn't lag when target reappears
+            if age > self._det_timeout:
+                self._smoothed_pos  = None
+                self._smoothed_quat = None
             return
+
+        # ── EMA smoothing on target pose ──────────────────────────────────────
+        # Damps overshoot from SpaceMouse spring rebound or rapid hand motion.
+        # alpha=1.0 passes the raw pose through unchanged.
+        if self._pose_alpha < 1.0:
+            a = self._pose_alpha
+            if self._smoothed_pos is None:
+                self._smoothed_pos  = target_pos.copy()
+                self._smoothed_quat = target_quat.copy() if target_quat is not None else None
+            else:
+                self._smoothed_pos = a * target_pos + (1.0 - a) * self._smoothed_pos
+                if target_quat is not None and self._smoothed_quat is not None:
+                    sq = a * target_quat + (1.0 - a) * self._smoothed_quat
+                    n  = float(np.linalg.norm(sq))
+                    self._smoothed_quat = sq / n if n > 1e-9 else target_quat
+            target_pos  = self._smoothed_pos
+            target_quat = self._smoothed_quat
 
         # Apply static EE frame offset (right-multiply) to compensate for the
         # mismatch between the teleop's zero orientation and the URDF EE frame.

@@ -365,6 +365,10 @@ def main():
     _homing_seen_running = False
     _homing_t            = 0.0
     _ik_was_failing      = False
+    # Homing requires RIGHT held for this long to prevent accidental triggers
+    HOMING_HOLD_S   = 2.0
+    _right_hold_t   = None   # monotonic time when RIGHT was first pressed
+    _right_hold_fired = False  # True once the hold-trigger fires (until release)
 
     combo_detector = ButtonComboDetector()
 
@@ -394,7 +398,8 @@ def main():
             # ── Button edge detection ─────────────────────────────────────
             buttons = list(state.buttons) if state.buttons else [0, 0]
             left_edge  = bool(buttons[0] and not prev_buttons[0])
-            right_edge = bool(len(buttons) > 1 and buttons[1] and not prev_buttons[1])
+            right_held = bool(len(buttons) > 1 and buttons[1])
+            right_edge = bool(right_held and not prev_buttons[1])
             prev_buttons = buttons[:2] if len(buttons) >= 2 else buttons + [0]
 
             # ── Combo detection ───────────────────────────────────────────
@@ -407,19 +412,34 @@ def main():
             # ── COMBO: cycle mode ─────────────────────────────────────────
             if event == 'COMBO':
                 ee_pos, ee_rot = cycle_mode()
+                _right_hold_t    = None   # cancel any pending homing hold
+                _right_hold_fired = False
                 print(f'\n[spacemouse] Switched to mode: {current_mode.name}')
                 # Consume event — no further button processing this tick
                 event = 'NONE'
 
-            # ── Homing (RIGHT in non-FSM modes, or from any mode) ────────
-            # RIGHT alone triggers homing in MANUAL
-            # Assembly/Pickup use RIGHT for FSM home (handled per-mode below)
-            _right_for_homing = (event == 'RIGHT'
-                                  and current_mode == TeleopMode.MANUAL)
-            _right_for_asm    = (event == 'RIGHT'
-                                  and current_mode == TeleopMode.ASSEMBLY)
-            _right_for_pickup = (event == 'RIGHT'
-                                  and current_mode == TeleopMode.PICKUP)
+            # ── Right-button hold tracking ────────────────────────────────
+            # Homing requires RIGHT held for HOMING_HOLD_S seconds to prevent
+            # accidental triggers during normal spacemouse operation.
+            if right_edge:
+                _right_hold_t    = now
+                _right_hold_fired = False
+            elif not right_held:
+                _right_hold_t    = None
+                _right_hold_fired = False
+
+            _right_homing_trigger = (
+                _right_hold_t is not None
+                and not _right_hold_fired
+                and (now - _right_hold_t) >= HOMING_HOLD_S
+            )
+            if _right_homing_trigger:
+                _right_hold_fired = True  # fire exactly once per hold
+
+            # ── Homing (RIGHT held 3 s in any mode) ──────────────────────
+            _right_for_homing = _right_homing_trigger and current_mode == TeleopMode.MANUAL
+            _right_for_asm    = _right_homing_trigger and current_mode == TeleopMode.ASSEMBLY
+            _right_for_pickup = _right_homing_trigger and current_mode == TeleopMode.PICKUP
 
             # ── Mode dispatch ─────────────────────────────────────────────
 
@@ -448,8 +468,9 @@ def main():
                     else:
                         asm_fsm.advance()
 
+                spd = asm_fsm.approach_speed_scale
                 if asm_fsm.translation_allowed:
-                    ee_pos = np.clip(ee_pos + delta_p, cfg['pos_min'], cfg['pos_max'])
+                    ee_pos = np.clip(ee_pos + delta_p * spd, cfg['pos_min'], cfg['pos_max'])
 
                 rot_override = asm_fsm.rotation_override
                 if rot_override is not None:
@@ -457,7 +478,7 @@ def main():
 
                 sm_active = float(np.linalg.norm(sm_lin)) > cfg['deadband']
                 asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
-                             sm_lin_delta=delta_p, sm_rot_delta=delta_r, dt=dt)
+                             sm_lin_delta=delta_p * spd, sm_rot_delta=delta_r * spd, dt=dt)
 
                 pos_override = asm_fsm.position_override
                 if pos_override is not None:
@@ -572,7 +593,11 @@ def main():
             # ── Display ───────────────────────────────────────────────────
             if tick % print_every == 0:
                 _fb = client.feedback if client is not None else {}
-                mode_hdr = f'  [{current_mode.name}]  (BOTH buttons to switch modes)'
+                hold_hint = ''
+                if _right_hold_t is not None and not _right_hold_fired:
+                    remaining = max(0.0, HOMING_HOLD_S - (now - _right_hold_t))
+                    hold_hint = f'  [HOME in {remaining:.1f}s]'
+                mode_hdr = f'  [{current_mode.name}]  (BOTH to switch){hold_hint}'
 
                 if not _arm_ready and not _homing_active:
                     print('\r[spacemouse] Waiting — press RIGHT to home and start   ',

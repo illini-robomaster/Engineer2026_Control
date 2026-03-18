@@ -104,6 +104,9 @@ class TaskConfig:
     stability_threshold_m: float
     confirm_cooldown_s: float
 
+    # Optional — default-valued fields must be last
+    approach_speed_scale: float = 1.0   # SpaceMouse speed multiplier during APPROACH
+
     def __post_init__(self):
         if self.difficulty not in DIFFICULTY_STAGES:
             raise ValueError(f'Invalid difficulty: {self.difficulty}')
@@ -130,6 +133,7 @@ def load_assembly_config(
         init_yaw_deg=yaw,
         rotation_speed_deg_s=raw['rotation_speed_deg_s'],
         approach_orient_speed_deg_s=raw.get('approach_orient_speed_deg_s', 45.0),
+        approach_speed_scale=raw.get('approach_speed_scale', 1.0),
         lift_distance_mm=raw['lift_distance_mm'],
         lift_speed_m_s=raw.get('lift_speed_m_s', 0.05),
         lift_axis_ee=np.array(raw.get('lift_axis_ee', [1.0, 0.0, 0.0]), dtype=float),
@@ -324,6 +328,13 @@ class AssemblyFSM:
     def approach_yaw_deg(self) -> float:
         """Current approach yaw angle (degrees)."""
         return self._approach_yaw_deg
+
+    @property
+    def approach_speed_scale(self) -> float:
+        """SpaceMouse speed multiplier — reduced during APPROACH for fine alignment."""
+        if self._state == AssemblyState.APPROACH:
+            return self._cfg.approach_speed_scale
+        return 1.0
 
     @property
     def translation_allowed(self) -> bool:
