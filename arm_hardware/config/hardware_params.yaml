@@ -25,7 +25,7 @@ uart_bridge_node:
     # Applied symmetrically on TX (ROS→MCU) and RX (MCU→ROS) so MoveIt
     # visualization always matches hardware motion.
     # Order: [Joint1, Joint2, Joint3, Joint4, Joint5, Joint6]
-    joint_sign_flip: [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0]
+    joint_sign_flip: [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0]
 
     # Per-joint gear ratio (motor turns / joint turn).
     # TX: motor_angle = joint_angle * ratio  (what we send to the MCU)

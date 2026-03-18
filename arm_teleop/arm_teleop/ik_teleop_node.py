@@ -250,6 +250,14 @@ class IkTeleopNode(Node):
         # 0.0 disables regularization.
         self._ik_seed_regularization = p('ik_seed_regularization', 0.02)
 
+        # ── Null-space posture control ────────────────────────────────────────
+        # Secondary task: pull joints toward q_preferred without disturbing the
+        # primary EE position task.  Only has effect in position-only mode
+        # (3D task, 6 joints → 3D null space).  Set 0.0 to disable.
+        self._nullspace_gain = p('nullspace_gain', 0.0)
+        _q_pref_list         = p('q_preferred',    [0.0] * 6)
+        self._q_preferred    = np.array(_q_pref_list, dtype=float)
+
         # ── Shared state ─────────────────────────────────────────────────────
         self._lock               = threading.Lock()
         self._joint_pos: dict    = {}
@@ -568,7 +576,16 @@ class IkTeleopNode(Node):
                 lam = max(lam * 0.5, 1e-7)
             prev_err = err_norm
 
-            dq = J.T @ np.linalg.solve(J @ J.T + lam * np.eye(3), err)
+            JJT_reg = J @ J.T + lam * np.eye(3)     # 3×3, reused below
+            J_dls   = J.T @ np.linalg.inv(JJT_reg)  # 6×3 DLS pseudoinverse
+            dq      = J_dls @ err                    # primary task (identical to before)
+
+            # Secondary: pull joints toward preferred config via null-space projection.
+            # N = I - J†J has rank 3 in position-only mode; negligible in 6D.
+            if self._nullspace_gain > 0.0:
+                N   = np.eye(len(q)) - J_dls @ J    # 6×6 null-space projector
+                dq += N @ (self._nullspace_gain * (self._q_preferred[:len(q)] - q))
+
             dq_norm = float(np.linalg.norm(dq))
             if dq_norm < 1e-9:
                 stop_reason = 'stuck'
@@ -712,15 +729,26 @@ class IkTeleopNode(Node):
         log_fail: bool = False,
         max_iters: int = 500,
         time_budget: float = 0.0,
+        pick_best: bool = False,
     ) -> tuple[Optional[list], str]:
         """Try each (label, seed) pair; return (solution, winning_seed_label).
 
         time_budget: if > 0, stop trying seeds after this many seconds elapsed.
+        pick_best:   if True, try ALL seeds within the time budget and return
+                     the solution whose joints are closest to q_preferred
+                     (L2 distance).  This prevents the solver from settling on
+                     a J4=±180° solution when a J4≈0° solution also exists.
+                     If False (default), return the first valid solution found.
         """
         t0 = time.monotonic() if time_budget > 0.0 else 0.0
+
+        best_sol:   Optional[list] = None
+        best_label: str            = ''
+        best_dist:  float          = float('inf')
+
         for label, s in seeds:
             if time_budget > 0.0 and (time.monotonic() - t0) > time_budget:
-                return None, ''
+                break
             if self._ctrl_ori and target_quat is not None:
                 result = self._solve_ik_6d(
                     target_pos, target_quat, s, label, log_fail, max_iters=max_iters)
@@ -728,8 +756,16 @@ class IkTeleopNode(Node):
                 result = self._solve_ik_pos_only(
                     target_pos, s, label, log_fail, max_iters=max_iters)
             if result is not None:
-                return result, label
-        return None, ''
+                if not pick_best:
+                    return result, label
+                dist = float(np.linalg.norm(
+                    np.array(result) - self._q_preferred[:len(result)]))
+                if dist < best_dist:
+                    best_dist  = dist
+                    best_sol   = result
+                    best_label = label
+
+        return best_sol, best_label
 
     # ── Snap-to-reachable fallback ────────────────────────────────────────────
 
@@ -861,6 +897,13 @@ class IkTeleopNode(Node):
         det_seeds: list = []
         if last_solved is not None:
             det_seeds.append(('last_solved', list(last_solved)))
+            # J4-reset seed: copy of last_solved with only J4 snapped to
+            # q_preferred[3]=0.  Starts near the real robot pose (high
+            # convergence probability) but with J4=0°, giving the solver a
+            # reliable path to a J4≈0 solution that pick_best can then prefer.
+            j4_reset    = list(last_solved)
+            j4_reset[3] = float(self._q_preferred[3])
+            det_seeds.append(('j4_reset', j4_reset))
         det_seeds.append(('joint_states', js_seed))
         det_seeds.append(('zero/home',    zero_seed))
 
@@ -880,7 +923,8 @@ class IkTeleopNode(Node):
         ik_iters = 200 if (self._ctrl_ori and target_quat is not None) else 500
         result, winning_seed = self._try_ik(
             target_pos, target_quat, seeds_to_try, log_fail=False,
-            max_iters=ik_iters, time_budget=tick_budget * 0.7)
+            max_iters=ik_iters, time_budget=tick_budget * 0.7,
+            pick_best=True)
 
         # Reject solutions that require a large jump from the last commanded position.
         # Catches configuration flips (e.g. J4 ±180°) that are geometrically valid

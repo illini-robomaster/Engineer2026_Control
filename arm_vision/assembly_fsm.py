@@ -31,9 +31,10 @@ class AssemblyState(Enum):
     IDLE            = auto()  # no task active, manual teleop
     APPROACH        = auto()  # human: translate toward core
     INSERT          = auto()  # human: push into core
-    LIFT            = auto()  # auto: move +Z
+    LIFT            = auto()  # auto: move along EE x-axis
     AUTO_ROTATE_P   = auto()  # auto: 90° arc (169mm radius)
     AUTO_ROTATE_Q   = auto()  # auto: arc to target angle (60mm radius)
+    RELEASE         = auto()  # human: withdraw EE backward along EE x-axis
     READY_CONFIRM   = auto()  # all stages done; hold pose
     CONFIRMED       = auto()  # confirmation issued, freeze everything
     ABORTED         = auto()  # user aborted
@@ -51,6 +52,7 @@ _ADVANCEABLE = frozenset({
     AssemblyState.APPROACH,
     AssemblyState.INSERT,
     AssemblyState.AUTO_ROTATE_Q,   # manual arc: LEFT when satisfied
+    AssemblyState.RELEASE,         # LEFT when withdrawn far enough
 })
 
 # Difficulty → ordered stage sequence
@@ -61,10 +63,12 @@ DIFFICULTY_STAGES: dict[int, list[AssemblyState]] = {
         AssemblyState.LIFT, AssemblyState.READY_CONFIRM],
     3: [AssemblyState.APPROACH, AssemblyState.INSERT,
         AssemblyState.LIFT, AssemblyState.AUTO_ROTATE_P,
-        AssemblyState.AUTO_ROTATE_Q, AssemblyState.READY_CONFIRM],
+        AssemblyState.AUTO_ROTATE_Q, AssemblyState.RELEASE,
+        AssemblyState.READY_CONFIRM],
     4: [AssemblyState.APPROACH, AssemblyState.INSERT,
         AssemblyState.LIFT, AssemblyState.AUTO_ROTATE_P,
-        AssemblyState.AUTO_ROTATE_Q, AssemblyState.READY_CONFIRM],
+        AssemblyState.AUTO_ROTATE_Q, AssemblyState.RELEASE,
+        AssemblyState.READY_CONFIRM],
 }
 
 
@@ -75,11 +79,14 @@ class TaskConfig:
     difficulty: int
     q_target_deg: float           # Q-arc angle (difficulty 3/4)
     init_pitch_deg: float         # initial EE pitch (-90° = EE x → world +Z)
+    init_yaw_deg: float           # approach yaw (0 = +X, 90 = +Y, etc.)
     rotation_speed_deg_s: float   # °/s for arc motions
+    approach_orient_speed_deg_s: float  # °/s for IDLE→APPROACH orientation transition
 
-    # Lift
+    # Lift — axis in EE frame at lift start (transformed to world at runtime)
     lift_distance_mm: float
     lift_speed_m_s: float
+    lift_axis_ee: np.ndarray         # EE-frame unit vec: direction to lift ([1,0,0] = EE x)
 
     # P arc: 90° pitch — EE x stays tangent (vectors in EE frame at arc start)
     p_arc_radius_mm: float
@@ -106,6 +113,7 @@ def load_assembly_config(
     path: str,
     difficulty_override: int | None = None,
     q_angle_override: float | None = None,
+    yaw_override: float | None = None,
 ) -> TaskConfig:
     """Load assembly parameters from YAML, with optional CLI overrides."""
     with open(path, 'r') as f:
@@ -113,14 +121,18 @@ def load_assembly_config(
 
     difficulty = difficulty_override if difficulty_override is not None else raw['difficulty']
     q_target = q_angle_override if q_angle_override is not None else raw['q_target_deg']
+    yaw = yaw_override if yaw_override is not None else raw.get('init_yaw_deg', 0.0)
 
     return TaskConfig(
         difficulty=difficulty,
         q_target_deg=q_target,
         init_pitch_deg=raw.get('init_pitch_deg', -90.0),
+        init_yaw_deg=yaw,
         rotation_speed_deg_s=raw['rotation_speed_deg_s'],
+        approach_orient_speed_deg_s=raw.get('approach_orient_speed_deg_s', 45.0),
         lift_distance_mm=raw['lift_distance_mm'],
         lift_speed_m_s=raw.get('lift_speed_m_s', 0.05),
+        lift_axis_ee=np.array(raw.get('lift_axis_ee', [1.0, 0.0, 0.0]), dtype=float),
         p_arc_radius_mm=raw['p_arc_radius_mm'],
         p_arc_angle_deg=raw.get('p_arc_angle_deg', 90.0),
         p_arc_center_dir_ee=np.array(raw['p_arc_center_dir_ee'], dtype=float),
@@ -135,6 +147,30 @@ def load_assembly_config(
 
 
 # ── Interpolators ───────────────────────────────────────────────────────────
+
+class RotationSlerp:
+    """Smooth SLERP between two orientations at a given angular speed."""
+
+    def __init__(self, start: Rotation, target: Rotation,
+                 speed_deg_s: float) -> None:
+        self._start = start
+        self._target = target
+        self._delta = start.inv() * target
+        angle_rad = self._delta.magnitude()
+        self._duration = max(np.degrees(angle_rad) / speed_deg_s, 0.1)
+        self._elapsed = 0.0
+
+    @property
+    def is_complete(self) -> bool:
+        return self._elapsed >= self._duration
+
+    def tick(self, dt: float) -> tuple[Rotation, bool]:
+        self._elapsed = min(self._elapsed + dt, self._duration)
+        alpha = self._elapsed / self._duration
+        interp = self._start * Rotation.from_rotvec(
+            self._delta.as_rotvec() * alpha)
+        return interp, self.is_complete
+
 
 class LinearInterpolator:
     """Straight-line position interpolation at a given speed."""
@@ -241,6 +277,10 @@ class AssemblyFSM:
         self._current_pos: Optional[np.ndarray] = None
         self._current_rot: Optional[Rotation] = None
 
+        # APPROACH orientation: pitch ramps automatically, yaw from SpaceMouse
+        self._approach_pitch_deg: float = 0.0
+        self._approach_yaw_deg: float = 0.0
+
         # Manual Q arc state (initialized on first tick of AUTO_ROTATE_Q)
         self._q_manual_initialized: bool = False
         self._q_pivot: Optional[np.ndarray] = None
@@ -248,6 +288,10 @@ class AssemblyFSM:
         self._q_offset_0: Optional[np.ndarray] = None
         self._q_start_rot: Optional[Rotation] = None
         self._q_arc_angle: float = 0.0
+
+        # RELEASE state: withdraw along EE x captured at RELEASE start
+        self._release_initialized: bool = False
+        self._release_ee_x: Optional[np.ndarray] = None
 
         # Stability tracking for READY_CONFIRM
         self._stability_timer = 0.0
@@ -265,12 +309,21 @@ class AssemblyFSM:
 
     @property
     def init_orientation(self) -> Rotation:
-        """EE orientation to snap to at task start (EE x → world +Z).
+        """EE orientation at task start.
 
-        Positive init_pitch_deg = pitch up. Scipy R_y(+θ) maps x toward -Z,
-        so we negate to get the robotics convention (positive = nose up).
+        Composition: Rz(yaw) * Ry(-pitch).
+          - Yaw selects the approach direction (0 = +X, 90 = +Y).
+          - Pitch tilts EE x toward +Z (positive = nose up).
+        Scipy Ry(+θ) maps x toward -Z, so we negate pitch.
         """
-        return Rotation.from_euler('y', -self._cfg.init_pitch_deg, degrees=True)
+        R_yaw = Rotation.from_euler('z', self._cfg.init_yaw_deg, degrees=True)
+        R_pitch = Rotation.from_euler('y', -self._cfg.init_pitch_deg, degrees=True)
+        return R_yaw * R_pitch
+
+    @property
+    def approach_yaw_deg(self) -> float:
+        """Current approach yaw angle (degrees)."""
+        return self._approach_yaw_deg
 
     @property
     def translation_allowed(self) -> bool:
@@ -278,18 +331,22 @@ class AssemblyFSM:
 
     @property
     def position_override(self) -> Optional[np.ndarray]:
-        """Position from auto-lift or arc interpolation."""
+        """Position from auto-lift, arc interpolation, or RELEASE withdrawal."""
         if self._state == AssemblyState.LIFT and self._lift_interp is not None:
             return self._current_pos
         if self._state == AssemblyState.AUTO_ROTATE_P and self._arc_interp is not None:
             return self._current_pos
         if self._state == AssemblyState.AUTO_ROTATE_Q and self._q_manual_initialized:
             return self._current_pos
+        if self._state == AssemblyState.RELEASE and self._release_initialized:
+            return self._current_pos
         return None
 
     @property
     def rotation_override(self) -> Optional[Rotation]:
-        """Orientation from arc interpolation."""
+        """Orientation from approach control, arc, or manual Q arc."""
+        if self._state == AssemblyState.APPROACH:
+            return self._current_rot
         if self._state == AssemblyState.AUTO_ROTATE_P and self._arc_interp is not None:
             return self._current_rot
         if self._state == AssemblyState.AUTO_ROTATE_Q and self._q_manual_initialized:
@@ -312,11 +369,12 @@ class AssemblyFSM:
     def stage_hint(self) -> str:
         hints = {
             AssemblyState.IDLE: 'Press LEFT to begin assembly task.',
-            AssemblyState.APPROACH: 'Translate toward core. Press LEFT when aligned.',
+            AssemblyState.APPROACH: 'Translate + rotate yaw to align. LEFT when ready.',
             AssemblyState.INSERT: 'Push to insert. Press LEFT when seated.',
             AssemblyState.LIFT: 'Auto-lifting +Z...',
             AssemblyState.AUTO_ROTATE_P: f'Arc P (85mm, 90deg)...',
             AssemblyState.AUTO_ROTATE_Q: f'Roll arc Q (60mm, target {self._cfg.q_target_deg}deg) — push L/R',
+            AssemblyState.RELEASE: 'Withdraw EE backward (EE -X). LEFT when clear.',
             AssemblyState.READY_CONFIRM: 'Hold steady. Press LEFT to confirm.',
             AssemblyState.CONFIRMED: 'Confirmed! Press LEFT to reset.',
             AssemblyState.ABORTED: 'Aborted. Press LEFT to reset.',
@@ -335,6 +393,11 @@ class AssemblyFSM:
         self._arc_interp = None
         self._q_manual_initialized = False
         self._q_arc_angle = 0.0
+
+        # APPROACH orientation: start at init_yaw; pitch ramps from 0 → init_pitch
+        self._approach_pitch_deg = 0.0
+        self._approach_yaw_deg = self._cfg.init_yaw_deg
+        self._current_rot = Rotation.from_euler('z', self._cfg.init_yaw_deg, degrees=True)
 
     def advance(self) -> None:
         if self._state not in _ADVANCEABLE:
@@ -359,6 +422,8 @@ class AssemblyFSM:
             self._stage_start_pos = None
             self._q_manual_initialized = False
             self._q_arc_angle = 0.0
+            self._release_initialized = False
+            self._release_ee_x = None
 
     def emergency_reset(self) -> None:
         """Immediately reset to IDLE from any state (e.g. right-button homing)."""
@@ -368,6 +433,8 @@ class AssemblyFSM:
         self._arc_interp = None
         self._q_manual_initialized = False
         self._q_arc_angle = 0.0
+        self._release_initialized = False
+        self._release_ee_x = None
         self._stage_start_pos = None
         self._stability_timer = 0.0
         self._recent_positions.clear()
@@ -375,18 +442,25 @@ class AssemblyFSM:
     # ── Tick ────────────────────────────────────────────────────────────────
 
     def tick(self, ee_pos: np.ndarray, ee_rot: Rotation,
-             sm_active: bool, sm_lin_delta: np.ndarray, dt: float) -> None:
+             sm_active: bool, sm_lin_delta: np.ndarray,
+             sm_rot_delta: np.ndarray, dt: float) -> None:
         if self._stage_start_pos is None and self._state in _ADVANCEABLE:
             self._stage_start_pos = ee_pos.copy()
 
-        if self._state == AssemblyState.LIFT:
-            self._tick_auto_lift(ee_pos, dt)
+        if self._state == AssemblyState.APPROACH:
+            self._tick_approach(sm_rot_delta, dt)
+
+        elif self._state == AssemblyState.LIFT:
+            self._tick_auto_lift(ee_pos, ee_rot, dt)
 
         elif self._state == AssemblyState.AUTO_ROTATE_P:
             self._tick_arc_auto(ee_pos, ee_rot, dt)
 
         elif self._state == AssemblyState.AUTO_ROTATE_Q:
             self._tick_manual_arc_q(ee_pos, ee_rot, sm_lin_delta)
+
+        elif self._state == AssemblyState.RELEASE:
+            self._tick_release(ee_pos, ee_rot, sm_lin_delta)
 
         elif self._state == AssemblyState.READY_CONFIRM:
             self._recent_positions.append(ee_pos.copy())
@@ -409,10 +483,43 @@ class AssemblyFSM:
         self._stability_timer = 0.0
         self._recent_positions.clear()
 
-    def _tick_auto_lift(self, ee_pos: np.ndarray, dt: float) -> None:
+    def _tick_approach(self, sm_rot_delta: np.ndarray, dt: float) -> None:
+        """Ramp pitch toward init_pitch; all three SpaceMouse axes modify orientation.
+
+        Pitch auto-ramp is applied as an incremental world-Y rotation so it
+        composes naturally with any roll/yaw the operator is applying simultaneously.
+        SpaceMouse angular deltas (roll, pitch, yaw) are then applied on top as
+        small incremental world-frame rotations.
+        """
+        target = self._cfg.init_pitch_deg
+        speed = self._cfg.approach_orient_speed_deg_s
+        if self._approach_pitch_deg < target:
+            delta_pitch = min(speed * dt, target - self._approach_pitch_deg)
+            self._approach_pitch_deg += delta_pitch
+            ramp = Rotation.from_euler('y', -delta_pitch, degrees=True)
+            self._current_rot = ramp * self._current_rot
+
+        # All three SpaceMouse axes — small incremental steps in EE frame.
+        # Right-multiply so SpaceMouse roll/pitch/yaw rotate around the EE's
+        # own axes, not the world axes.  This makes pitch feel correct even
+        # when the wrist is pitched 90° (EE x → world Z).
+        self._current_rot = self._current_rot * Rotation.from_rotvec(sm_rot_delta)
+
+        # Track roll channel for yaw display.  With EE-frame rotation and
+        # pitch≈90° (EE x → world Z), SpaceMouse roll = rotation around EE x
+        # = rotation around world Z = effective world yaw.
+        self._approach_yaw_deg += np.degrees(sm_rot_delta[0])
+
+    def _tick_auto_lift(self, ee_pos: np.ndarray, ee_rot: Rotation,
+                        dt: float) -> None:
         if self._lift_interp is None:
-            target = ee_pos.copy()
-            target[2] += self._cfg.lift_distance_mm / 1000.0
+            # Compute lift direction in world frame from EE frame at lift start.
+            # lift_axis_ee = [1,0,0] (EE x) → world +Z when pitch=90°, so
+            # default behavior is preserved; any custom approach orientation
+            # is followed automatically.
+            lift_dir = ee_rot.apply(self._cfg.lift_axis_ee)
+            lift_dir /= np.linalg.norm(lift_dir)
+            target = ee_pos + lift_dir * (self._cfg.lift_distance_mm / 1000.0)
             self._lift_interp = LinearInterpolator(
                 ee_pos, target, self._cfg.lift_speed_m_s)
             self._current_pos = ee_pos.copy()
@@ -480,6 +587,26 @@ class AssemblyFSM:
         arc_rot = Rotation.from_rotvec(self._q_axis_world * self._q_arc_angle)
         self._current_pos = self._q_pivot + arc_rot.apply(self._q_offset_0)
         self._current_rot = arc_rot * self._q_start_rot
+
+    def _tick_release(self, ee_pos: np.ndarray, ee_rot: Rotation,
+                      sm_lin_delta: np.ndarray) -> None:
+        """Manual withdrawal along EE x-axis.
+
+        On first tick: captures EE x direction in world frame from current ee_rot.
+        Each tick: projects SpaceMouse delta onto that axis and updates position.
+        Rotation is unchanged (no rotation_override returned for RELEASE).
+        LEFT button advances to READY_CONFIRM.
+        """
+        if not self._release_initialized:
+            ee_x = ee_rot.apply(np.array([1.0, 0.0, 0.0]))
+            self._release_ee_x = ee_x / np.linalg.norm(ee_x)
+            self._current_pos = ee_pos.copy()
+            self._release_initialized = True
+            return
+
+        # Project SpaceMouse delta onto EE x (forward = positive, backward = negative)
+        d_x = float(np.dot(sm_lin_delta, self._release_ee_x))
+        self._current_pos = self._current_pos + d_x * self._release_ee_x
 
     def _make_arc(self, ee_pos: np.ndarray,
                   ee_rot: Rotation) -> ArcInterpolator:

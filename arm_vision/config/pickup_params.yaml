@@ -1,0 +1,15 @@
+pickup:
+  init_pitch_deg: 0.0                   # EE x stays horizontal — device axis is parallel to ground
+  init_yaw_deg: 0.0                     # fixed approach yaw — no yaw control during pickup
+  approach_orient_speed_deg_s: 45.0    # pitch ramp speed during APPROACH
+
+  arc_radius_mm: 130.0                  # radial storage fixture radius
+  arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to arc pivot (-EE z)
+  arc_axis_ee: [1.0, 0.0, 0.0]         # EE-frame rotation axis (EE x = roll)
+
+  # After ARC_ALIGN: auto-lift along EE z-axis before confirmation gate
+  lift_distance_mm: 80.0
+  lift_speed_m_s: 0.05
+
+  stability_hold_s: 0.5
+  stability_threshold_m: 0.003

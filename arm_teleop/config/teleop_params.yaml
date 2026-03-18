@@ -98,6 +98,13 @@ ik_teleop_node:
     # Leave empty to disable.
     debug_log: ""
 
+    # Null-space posture control: secondary objective to keep joints near preferred
+    # angles without disturbing the primary EE position task.
+    # Only has effect in position-only mode (3D task, 6 joints → 3D null space).
+    # Set nullspace_gain: 0.0 to disable.
+    nullspace_gain: 0.5
+    q_preferred: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # radians; J4=0 prevents wrist limit accumulation
+
     joint_names:
       - Joint1
       - Joint2

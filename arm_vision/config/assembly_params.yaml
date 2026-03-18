@@ -7,13 +7,20 @@ assembly:
   # At task start, EE x-axis → world +Z (pointing up to hold energy unit).
   # Positive value = pitch up (EE x rotates toward +Z).
   init_pitch_deg: 90.0
+  # Yaw rotation (degrees) applied BEFORE pitch — sets the approach direction.
+  # 0 = approach along +X (default), 90 = approach along +Y, etc.
+  init_yaw_deg: 0.0
 
   # ── Auto-motion speed ──────────────────────────────────────────────────────
   rotation_speed_deg_s: 30.0      # degrees/second for arc motions
+  approach_orient_speed_deg_s: 45.0  # degrees/second for initial orientation transition
 
   # ── Auto-lift (LIFT stage) ─────────────────────────────────────────────────
-  lift_distance_mm: 100.0         # straight +Z travel
+  lift_distance_mm: 100.0
   lift_speed_m_s: 0.05            # m/s  (100mm in 2s)
+  # Lift direction in EE frame at lift start — transformed to world at runtime.
+  # [1,0,0] = EE x-axis; when pitch=90° this equals world +Z (preserves old behavior).
+  lift_axis_ee: [1.0, 0.0, 0.0]
 
   # ── P arc: 90° pitch ───────────────────────────────────────────────────────
   # EE x-axis stays tangent to a circle of radius 85mm.
@@ -23,7 +30,7 @@ assembly:
   # automatically followed.
   #   pivot  = -EE z  (85mm behind EE in its own Z)
   #   axis   = +EE y  (pitch about EE y: axis × offset = [0,1,0]×[0,0,+r] = [r,0,0] = EE x ✓)
-  p_arc_radius_mm: 85.0
+  p_arc_radius_mm: 40.0
   p_arc_angle_deg: 90.0
   p_arc_center_dir_ee: [0.0, 0.0, -1.0]   # EE-frame direction from EE to pivot
   p_arc_axis_ee:       [0.0, 1.0,  0.0]   # EE-frame rotation axis (EE y = pitch)

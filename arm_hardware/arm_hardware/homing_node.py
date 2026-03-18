@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-homing_node — moves arm joints to 0 rad in a safe, collision-aware order.
+homing_node — moves arm joints to the home position in a safe, collision-aware order.
+
+Home position (degrees): J1=0, J2=-50, J3=-50, J4=0, J5=0, J6=0
 
 Homing groups are chosen dynamically based on Joint2's current angle:
 
@@ -53,10 +55,20 @@ _GROUPS_J2_NEG = [
     ['Joint1'],                                 # base rotation last
 ]
 _GROUPS_J2_POS = [
-    ['Joint3', 'Joint4', 'Joint5', 'Joint6'],  # tuck all distal joints simultaneously
-    ['Joint2'],                                 # retract shoulder
+    ['Joint3','Joint2', 'Joint4', 'Joint5', 'Joint6'],  # tuck all distal joints simultaneously
     ['Joint1'],                                 # base rotation last
 ]
+
+# ── Home position ─────────────────────────────────────────────────────────────
+_HOME_DEG: dict[str, float] = {
+    'Joint1':  0.0,
+    'Joint2':  50.0,
+    'Joint3': -50.0,
+    'Joint4':  0.0,
+    'Joint5':  0.0,
+    'Joint6':  0.0,
+}
+_HOME_RAD: dict[str, float] = {j: math.radians(d) for j, d in _HOME_DEG.items()}
 
 # ── Action server (JointTrajectoryController standard naming) ──────────────────
 _ACTION_NAME = '/arm_controller/follow_joint_trajectory'
@@ -77,7 +89,7 @@ class HomingNode(Node):
 
         # Current joint positions (updated from /joint_states)
         self._current: dict[str, float] = {}
-        self._homed: set[str] = set()   # joints already homed → always command 0
+        self._homed: set[str] = set()   # joints already homed → always command home position
         self._saved_acm = None
 
         self._js_sub = self.create_subscription(
@@ -161,34 +173,36 @@ class HomingNode(Node):
     # ── Group homing step ──────────────────────────────────────────────────────
 
     def _home_group(self, joint_names: list[str]) -> bool:
-        """Move all joints in `joint_names` to 0 simultaneously, hold all others.
-        Returns True on success."""
+        """Move all joints in `joint_names` to their home positions simultaneously,
+        hold all others.  Returns True on success."""
         current_pos = {j: self._current.get(j, 0.0) for j in _ALL_JOINTS}
 
-        # Filter out joints that are already at zero
-        to_move = [j for j in joint_names if abs(current_pos[j]) >= 0.005]
+        # Filter out joints already within 0.005 rad of their home position
+        to_move = [j for j in joint_names
+                   if abs(current_pos[j] - _HOME_RAD[j]) >= 0.005]
         if not to_move:
             self.get_logger().info(
-                f'  {" + ".join(joint_names)} already at zero, skip.')
+                f'  {" + ".join(joint_names)} already at home position, skip.')
             return True
 
         # Duration driven by the joint that has the farthest to travel
-        duration_s = max(self._duration_for(current_pos[j]) for j in to_move)
+        duration_s = max(
+            self._duration_for(current_pos[j] - _HOME_RAD[j]) for j in to_move)
 
         label = ' + '.join(joint_names)
         self.get_logger().info(
             f'  Homing [{label}]  duration={duration_s:.1f}s  ' +
-            '  '.join(f'{j}: {math.degrees(current_pos[j]):+.1f}°→0°' for j in to_move))
+            '  '.join(f'{j}: {math.degrees(current_pos[j]):+.1f}°'
+                      f'→{_HOME_DEG[j]:+.1f}°' for j in to_move))
 
         target_pos = dict(current_pos)
-        # Zero the joints in this group AND all previously-homed joints.
-        # Without this, encoder lag from earlier groups (motor hasn't fully
-        # converged to 0) would be re-commanded as the hold position,
-        # effectively undoing earlier homing.
+        # Move this group to home AND keep all previously-homed joints at home.
+        # Without this, encoder lag from earlier groups would be re-commanded as
+        # the hold position, effectively undoing earlier homing.
         for j in to_move:
-            target_pos[j] = 0.0
+            target_pos[j] = _HOME_RAD[j]
         for j in self._homed:
-            target_pos[j] = 0.0
+            target_pos[j] = _HOME_RAD[j]
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(_ALL_JOINTS)
@@ -280,7 +294,9 @@ class HomingNode(Node):
                     return
 
             self.get_logger().info('=' * 50)
-            self.get_logger().info('Homing complete — all joints at 0 rad')
+            self.get_logger().info(
+                'Homing complete — ' +
+                '  '.join(f'{j}={_HOME_DEG[j]:+.1f}°' for j in _ALL_JOINTS))
             self.get_logger().info('=' * 50)
         finally:
             self._restore_collisions()
