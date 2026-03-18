@@ -99,6 +99,7 @@ class TaskConfig:
     q_arc_radius_mm: float
     q_arc_center_dir_ee: np.ndarray  # EE-frame unit vec: EE → pivot
     q_arc_axis_ee: np.ndarray        # EE-frame rotation axis
+    q_arc_speed_deg_s: float         # max angular rate for manual Q-arc (deg/s)
 
     # Confirmation
     stability_hold_s: float
@@ -145,6 +146,7 @@ def load_assembly_config(
         q_arc_radius_mm=raw['q_arc_radius_mm'],
         q_arc_center_dir_ee=np.array(raw['q_arc_center_dir_ee'], dtype=float),
         q_arc_axis_ee=np.array(raw['q_arc_axis_ee'], dtype=float),
+        q_arc_speed_deg_s=raw.get('q_arc_speed_deg_s', 45.0),
         stability_hold_s=raw['stability_hold_s'],
         stability_threshold_m=raw['stability_threshold_m'],
         confirm_cooldown_s=raw['confirm_cooldown_s'],
@@ -469,7 +471,7 @@ class AssemblyFSM:
             self._tick_arc_auto(ee_pos, ee_rot, dt)
 
         elif self._state == AssemblyState.AUTO_ROTATE_Q:
-            self._tick_manual_arc_q(ee_pos, ee_rot, sm_lin_delta)
+            self._tick_manual_arc_q(ee_pos, ee_rot, sm_lin_delta, dt)
 
         elif self._state == AssemblyState.RELEASE:
             self._tick_release(ee_pos, ee_rot, sm_lin_delta)
@@ -560,12 +562,13 @@ class AssemblyFSM:
             self._move_to_next_stage()
 
     def _tick_manual_arc_q(self, ee_pos: np.ndarray, ee_rot: Rotation,
-                            sm_lin_delta: np.ndarray) -> None:
+                            sm_lin_delta: np.ndarray, dt: float) -> None:
         """Manual arc — SpaceMouse left/right drives arc angle.
 
-        EE y stays tangent to the 60mm circle.  The input is projected onto
-        the current tangent direction so control is consistent regardless of
-        how far the arc has swept.
+        EE y stays tangent to the circle.  The input is projected onto the
+        current tangent direction so control is consistent regardless of how
+        far the arc has swept.  The angular rate is capped at q_arc_speed_deg_s
+        to decouple smoothness from SpaceMouse sensitivity.
         """
         if not self._q_manual_initialized:
             cfg = self._cfg
@@ -592,9 +595,14 @@ class AssemblyFSM:
             return
         tangent /= t_norm
 
-        # Project SpaceMouse delta onto tangent → arc length → angle
-        d_arc = float(np.dot(sm_lin_delta, tangent))
-        self._q_arc_angle += d_arc / radius
+        # Project SpaceMouse delta onto tangent → angle change (rad)
+        d_angle = float(np.dot(sm_lin_delta, tangent)) / radius
+
+        # Cap angular rate so smoothness is independent of SpaceMouse sensitivity
+        max_d_angle = float(np.radians(self._cfg.q_arc_speed_deg_s)) * dt
+        d_angle = float(np.clip(d_angle, -max_d_angle, max_d_angle))
+
+        self._q_arc_angle += d_angle
 
         arc_rot = Rotation.from_rotvec(self._q_axis_world * self._q_arc_angle)
         self._current_pos = self._q_pivot + arc_rot.apply(self._q_offset_0)

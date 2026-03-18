@@ -36,15 +36,17 @@ ik_teleop_node:
     # Camera is still 30 fps, but the faster tick reduces wait after TCP arrival.
     publish_rate_hz: 60.0
 
-    # Trajectory time_from_start.  One 60 Hz period — the arm controller
-    # completes each waypoint before the next arrives, making motion feel live.
-    # If the arm faults due to velocity limits, raise in 5 ms steps (0.038, 0.043…).
-    traj_duration_s: 0.033   # 33 ms ~= 1x the 60 Hz period
+    # Trajectory time_from_start.  Three 60 Hz periods — the controller always
+    # has a target ahead of it and interpolates smoothly through the command
+    # stream instead of reaching each waypoint and stopping to wait.
+    # At 30 deg/s P-arc (201.5 mm radius) this is ~2.6 mm of look-ahead, well
+    # within IK accuracy.  If the arm faults on velocity limits, raise further.
+    traj_duration_s: 0.050   # 50 ms ~= 3x the 60 Hz period
 
     # Suppress IK re-solve when the commanded joints change by less than this.
-    # Keep this small enough to preserve fine alignment once pose_alpha smoothing
-    # is active, while still blocking encoder-noise chatter.
-    joint_deadband_rad: 0.005
+    # 0.001 rad (~0.06°) is tight enough to block encoder noise while publishing
+    # every valid arc step — prevents the staircase stepping from 0.005.
+    joint_deadband_rad: 0.001
 
     # Reject IK solutions where any single joint would move more than this from
     # the current hardware position.  Catches configuration flips (e.g. J4 ±180°
@@ -74,9 +76,10 @@ ik_teleop_node:
     control_orientation: true
 
     # Weight applied to the orientation error rows in 6D mode.
-    # 1.0 = equal weighting.  Increase (e.g. 2.0) if orientation lags behind
-    # position; decrease (e.g. 0.5) if orientation causes instability.
-    ori_weight: 1.0
+    # 0.5 weights position 2× over orientation — reduces IK solution variance
+    # across ticks (a stiff orientation target increases joint-space jitter near
+    # singularities).  Raise toward 1.0 if orientation falls noticeably behind.
+    ori_weight: 0.5
 
     # [DEPRECATED — now unused]  J4 flip prevention is handled by the
     # max_joint_jump_rad guard in the control loop, not inside the solver.

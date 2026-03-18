@@ -47,6 +47,7 @@ assembly:
   q_arc_radius_mm: 100.0
   q_arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to pivot (-EE z)
   q_arc_axis_ee:       [1.0, 0.0, 0.0]   # EE-frame rotation axis (EE x = roll)
+  q_arc_speed_deg_s: 45.0                # max angular rate for manual Q-arc driving
 
   # ── Confirmation gating ────────────────────────────────────────────────────
   stability_hold_s: 0.5
