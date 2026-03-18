@@ -1,0 +1,1 @@
+ros2 launch arm_bringup arm_bringup.launch.py       teleop_mode:=ik_direct       use_teleop:=true       uart_port:=/dev/ttyTHS0       use_real_robot:=true       control_orientation:=true log-level:=debug ori_err:=true use_moveit_rviz:=false debug_rx:=false
