@@ -177,68 +177,74 @@ def render_pickup(
 # ── P-arc recording analysis ─────────────────────────────────────────────────
 
 def analyze_p_arc(
-    log: list,
     start_pos: 'np.ndarray',
     start_rot: 'Rotation',
+    end_pos: 'np.ndarray',
+    end_rot: 'Rotation',
     handle_offset_ee_mm: 'np.ndarray | None' = None,
 ) -> None:
-    """Fit a circle to the recorded handle path and print derived P-arc params.
+    """Derive P-arc parameters from the initial and final EE 6D poses.
 
-    *log* is a list of (ee_pos, ee_rot) captured while the user drew the arc.
-    The circle is fit in the world XZ plane (P arc rotates about world Y).
+    Because the recording constrains motion to EE x-z translation and EE y
+    rotation, the two poses define a pure rotation about a fixed world axis.
+    The pivot is solved analytically from the rigid-body constraint plus the
+    axis-plane constraint (pivot lies in the plane ⊥ axis through start_pos).
     """
     if handle_offset_ee_mm is None:
-        handle_offset_ee_mm = np.array([-108.0, 0.0, 0.0])  # default: 108 mm below EE
+        handle_offset_ee_mm = np.array([-108.0, 0.0, 0.0])
 
-    if len(log) < 10:
-        print('[P-ARC] Too few points (<10) — move more during recording.')
+    arc_rot   = end_rot * start_rot.inv()
+    rv        = arc_rot.as_rotvec()
+    angle_rad = float(np.linalg.norm(rv))
+    if angle_rad < 1e-4:
+        print('[P-ARC] No rotation detected — move more during recording.')
         return
 
-    h_off = handle_offset_ee_mm / 1000.0
-    handles = np.array([pos + rot.apply(h_off) for pos, rot in log])
+    angle_deg = float(np.degrees(angle_rad))
 
-    # Algebraic circle fit in XZ plane: (x-cx)^2 + (z-cz)^2 = r^2
-    # Rearranges to linear system: [2x, 2z, 1] [cx; cz; r^2-cx^2-cz^2] = x^2+z^2
-    X, Z = handles[:, 0], handles[:, 2]
-    A = np.column_stack([2.0 * X, 2.0 * Z, np.ones(len(X))])
-    b = X ** 2 + Z ** 2
-    coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-    cx, cz = float(coeffs[0]), float(coeffs[1])
-    r_handle_m = float(np.sqrt(max(0.0, coeffs[2] + cx ** 2 + cz ** 2)))
-    pivot = np.array([cx, float(np.mean(handles[:, 1])), cz])
+    # Rotation axis in world frame — should equal start EE y (constrained during recording)
+    axis_world = rv / angle_rad
 
-    # Fit quality: std-dev of residuals
-    dists = np.hypot(handles[:, 0] - cx, handles[:, 2] - cz)
-    residual_mm = float(np.std(dists) * 1000.0)
+    # Pivot: solve (I − R) @ pivot = end_pos − R @ start_pos
+    # The null space of (I − R) is along axis, so add one axis-plane constraint:
+    #   axis · pivot = axis · start_pos  (pivot lies in plane ⊥ axis through start)
+    R   = arc_rot.as_matrix()
+    A   = np.vstack([np.eye(3) - R, axis_world[np.newaxis, :]])
+    b   = np.append(end_pos - R @ start_pos, float(np.dot(axis_world, start_pos)))
+    pivot, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
-    # EE arc radius + center direction in EE frame
-    c_world = pivot - start_pos
-    ee_radius_mm = float(np.linalg.norm(c_world) * 1000.0)
-    c_dir_ee = start_rot.inv().apply(c_world / (np.linalg.norm(c_world) + 1e-9))
+    center_world  = pivot - start_pos
+    ee_radius_m   = float(np.linalg.norm(center_world))
+    if ee_radius_m < 1e-4:
+        print('[P-ARC] Pivot too close to EE start — check recording.')
+        return
 
-    # Arc angle swept (handle start → handle end around pivot)
-    v0 = handles[0] - pivot
-    v1 = handles[-1] - pivot
-    cos_a = float(np.dot(v0, v1) / (np.linalg.norm(v0) * np.linalg.norm(v1) + 1e-9))
-    angle_deg = float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
+    center_dir_ee = start_rot.inv().apply(center_world / ee_radius_m)
+
+    # Handle arc radius (constant throughout arc by construction)
+    h_off        = handle_offset_ee_mm / 1000.0
+    handle_start = start_pos + start_rot.apply(h_off)
+    r_handle_mm  = float(np.linalg.norm(handle_start - pivot) * 1000.0)
+
+    # Verification: re-predict end_pos from derived pivot + arc_rot
+    predicted_end = pivot + arc_rot.apply(start_pos - pivot)
+    pos_err_mm    = float(np.linalg.norm(predicted_end - end_pos) * 1000.0)
 
     sep = '=' * 62
     print(f'\n{sep}')
-    print('[P-ARC RECORD] Analysis')
-    print(f'  Points logged:         {len(log)}')
-    quality = 'good' if residual_mm < 3.0 else ('ok' if residual_mm < 8.0 else 'noisy — try again more steadily')
-    print(f'  Circle-fit residual:   {residual_mm:.2f} mm  ({quality})')
-    print()
+    print('[P-ARC RECORD] Analysis (start + end pose)')
+    print(f'  Arc angle:             {angle_deg:.1f}°')
+    print(f'  Axis (world):          [{axis_world[0]:+.4f}, {axis_world[1]:+.4f}, {axis_world[2]:+.4f}]')
     print(f'  Pivot (world):         [{pivot[0]:+.4f}, {pivot[1]:+.4f}, {pivot[2]:+.4f}]')
-    print(f'  Handle arc radius:     {r_handle_m * 1000:.1f} mm')
-    print(f'  EE arc radius:         {ee_radius_mm:.1f} mm')
-    print(f'  Arc angle swept:       {angle_deg:.1f}°')
-    print(f'  center_dir_ee:         [{c_dir_ee[0]:.4f}, {c_dir_ee[1]:.4f}, {c_dir_ee[2]:.4f}]')
+    print(f'  Handle arc radius:     {r_handle_mm:.1f} mm')
+    print(f'  EE arc radius:         {ee_radius_m * 1000:.1f} mm')
+    print(f'  center_dir_ee:         [{center_dir_ee[0]:.4f}, {center_dir_ee[1]:.4f}, {center_dir_ee[2]:.4f}]')
+    print(f'  Verification error:    {pos_err_mm:.2f} mm')
     print()
     print('  ── Paste into assembly_params.yaml ──────────────────────')
-    print(f'  p_arc_radius_mm:       {ee_radius_mm:.1f}')
+    print(f'  p_arc_radius_mm:       {ee_radius_m * 1000:.1f}')
     print(f'  p_arc_angle_deg:       {angle_deg:.1f}')
-    print(f'  p_arc_center_dir_ee:   [{c_dir_ee[0]:.4f}, {c_dir_ee[1]:.4f}, {c_dir_ee[2]:.4f}]')
+    print(f'  p_arc_center_dir_ee:   [{center_dir_ee[0]:.4f}, {center_dir_ee[1]:.4f}, {center_dir_ee[2]:.4f}]')
     print(sep)
 
 
@@ -447,7 +453,6 @@ def main():
 
     # ── P-arc recording state ──────────────────────────────────────────────
     _p_arc_recording  = False
-    _p_arc_log: list  = []
     _p_arc_start_pos  = None
     _p_arc_start_rot  = None
     _p_arc_prev_state = None
@@ -530,7 +535,6 @@ def main():
                 if _right_for_asm and not _homing_active:
                     asm_fsm.emergency_reset()
                     _p_arc_recording = False
-                    _p_arc_log = []
                     ee_rot = Rotation.from_quat(cfg['init_quat'])
                     if client is not None:
                         client.send_home()
@@ -550,16 +554,16 @@ def main():
                     _p_arc_log        = []
                     _p_arc_start_pos  = ee_pos.copy()
                     _p_arc_start_rot  = ee_rot
-                    print('\n[P-ARC RECORD] SpaceMouse active — draw the arc freely.')
-                    print('[P-ARC RECORD] Press LEFT when done to get derived params.')
+                    print('\n[P-ARC RECORD] Draw the arc (EE x-z plane, EE y rotation only).')
+                    print('[P-ARC RECORD] Press LEFT at the end pose to derive params.')
                 _p_arc_prev_state = asm_fsm.state
 
                 # ── Button handling ───────────────────────────────────────
                 if event == 'LEFT':
                     if _p_arc_recording and asm_fsm.state == AssemblyState.AUTO_ROTATE_P:
                         _p_arc_recording = False
-                        analyze_p_arc(_p_arc_log, _p_arc_start_pos, _p_arc_start_rot,
-                                      _handle_offset_ee)
+                        analyze_p_arc(_p_arc_start_pos, _p_arc_start_rot,
+                                      ee_pos, ee_rot, _handle_offset_ee)
                         asm_fsm.advance()   # AUTO_ROTATE_P is now in _ADVANCEABLE
                     elif asm_fsm.state == AssemblyState.IDLE:
                         asm_fsm.start()
@@ -588,7 +592,6 @@ def main():
                     dr_constrained = np.dot(dr, ee_y) * ee_y
                     ee_pos = np.clip(ee_pos + dp_constrained, cfg['pos_min'], cfg['pos_max'])
                     ee_rot = Rotation.from_rotvec(dr_constrained) * ee_rot
-                    _p_arc_log.append((ee_pos.copy(), ee_rot))
                     # Do NOT tick the FSM — keeps the arc from auto-completing
                 else:
                     if asm_fsm.translation_allowed:
@@ -726,7 +729,12 @@ def main():
                     remaining = max(0.0, HOMING_HOLD_S - (now - _right_hold_t))
                     hold_hint = f'  [HOME in {remaining:.1f}s]'
                 if _p_arc_recording:
-                    mode_hdr = f'  [P-ARC RECORD] {len(_p_arc_log)} pts logged — LEFT to finish'
+                    if _p_arc_start_rot is not None:
+                        _arc_rv  = (ee_rot * _p_arc_start_rot.inv()).as_rotvec()
+                        _arc_deg = float(np.degrees(np.linalg.norm(_arc_rv)))
+                    else:
+                        _arc_deg = 0.0
+                    mode_hdr = f'  [P-ARC RECORD] swept {_arc_deg:.1f}° — LEFT to finish'
                 else:
                     mode_hdr = f'  [{current_mode.name}]  (BOTH to switch){hold_hint}'
 

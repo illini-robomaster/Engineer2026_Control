@@ -24,12 +24,15 @@ assembly:
   lift_axis_ee: [1.0, 0.0, 0.0]
 
   # ── P arc: 90° pitch ───────────────────────────────────────────────────────
-  # Pivot sits on EE −x axis (= world −Z at pitch=90°), 60 mm below EE tip.
-  # Handle (grip point) is 108 mm below EE tip → 48 mm below pivot.
-  # Handle arc radius = 48 mm.
-  p_arc_radius_mm: 50.0
-  p_arc_angle_deg: 90.0
-  p_arc_center_dir_ee: [-1.0, 0.0, 0.0]          # EE −x: pivot straight below EE
+  # Derived from SpaceMouse recording (2-pose fit, verification error = 0 mm).
+  # At pitch=90°: EE x→world +Z, EE z→world −X.
+  # center_dir_ee [0.6836, 0, −0.7299] maps to world [+0.730, 0, +0.684]:
+  #   pivot is 201.5 mm ABOVE (+Z) and FORWARD (+X) from the EE tip.
+  # Handle (108 mm below EE along EE −x = world −Z) is on the far side of
+  #   the EE from the pivot → handle arc radius = 286.4 mm.
+  p_arc_radius_mm: 201.5
+  p_arc_angle_deg: 89.4
+  p_arc_center_dir_ee: [0.6836, 0.0, -0.7299]    # measured: pivot above+forward of EE
   p_arc_axis_ee:       [0.0, 1.0,  0.0]           # EE-frame rotation axis (EE y = pitch)
 
   # ── Q arc: manual roll sweep — EE at TOP of circle ────────────────────────
@@ -41,7 +44,7 @@ assembly:
   #   tangent = -EE y  (EE sweeps right → world -Y when arc angle increases)
   # Controlled manually: SpaceMouse left/right drives the arc angle.
   # LEFT button advances out of this stage when satisfied.
-  q_arc_radius_mm: 60.0
+  q_arc_radius_mm: 100.0
   q_arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to pivot (-EE z)
   q_arc_axis_ee:       [1.0, 0.0, 0.0]   # EE-frame rotation axis (EE x = roll)
 

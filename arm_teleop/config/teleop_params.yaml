@@ -66,9 +66,12 @@ ik_teleop_node:
     detection_timeout_s: 0.4
 
     # Set true to enforce the incoming quaternion (full 6D pose IK).
-    # Only use after camera->robot orientation calibration is validated.
-    # Position-only (false) is more robust for initial deployment.
-    control_orientation: false
+    # Required for assembly arc stages: the FSM provides exact orientation via
+    # rotation_override for both P and Q arcs.  Without this, the IK is
+    # position-only and the wrist is free to reorganize — causing branch flips
+    # (snap) or singularity failures at the top of the Q-arc.
+    # Fallback: if 6D IK fails, the node drops to position-only automatically.
+    control_orientation: true
 
     # Weight applied to the orientation error rows in 6D mode.
     # 1.0 = equal weighting.  Increase (e.g. 2.0) if orientation lags behind
