@@ -24,16 +24,16 @@ assembly:
   lift_axis_ee: [1.0, 0.0, 0.0]
 
   # ── P arc: 90° pitch ───────────────────────────────────────────────────────
-  # Derived from SpaceMouse recording (2-pose fit, verification error = 0 mm).
-  # At pitch=90°: EE x→world +Z, EE z→world −X.
-  # center_dir_ee [0.6836, 0, −0.7299] maps to world [+0.730, 0, +0.684]:
-  #   pivot is 201.5 mm ABOVE (+Z) and FORWARD (+X) from the EE tip.
-  # Handle (108 mm below EE along EE −x = world −Z) is on the far side of
-  #   the EE from the pivot → handle arc radius = 286.4 mm.
-  p_arc_radius_mm: 201.5
-  p_arc_angle_deg: 89.4
-  p_arc_center_dir_ee: [0.6836, 0.0, -0.7299]    # measured: pivot above+forward of EE
-  p_arc_axis_ee:       [0.0, 1.0,  0.0]           # EE-frame rotation axis (EE y = pitch)
+  # Physical measurements: when holding the handle, the pivot is
+  #   +108 mm along EE +x  AND  −120 mm along EE z  (= +120 mm along EE −z)
+  # Pivot in EE frame: [+108, 0, −120] mm
+  #   EE→pivot distance = sqrt(108² + 120²) = sqrt(26064) ≈ 161.4 mm
+  #   center_dir_ee = [108, 0, −120] / 161.4 ≈ [0.6689, 0, −0.7432]
+  # Rotation axis = EE y (pivot lies in EE x−z plane, so EE y is perpendicular).
+  p_arc_radius_mm: 161.4
+  p_arc_angle_deg: 90
+  p_arc_center_dir_ee: [0.6689, 0.0, -0.7432]     # toward pivot: +EE x, −EE z
+  p_arc_axis_ee:       [0.0,   1.0,  0.0]          # EE-frame rotation axis (EE y = pitch)
 
   # ── Q arc: manual roll sweep — EE at TOP of circle ────────────────────────
   # After P arc, EE z → world +Z.  Pivot at -EE z puts it 60mm BELOW the EE,
@@ -47,7 +47,6 @@ assembly:
   q_arc_radius_mm: 100.0
   q_arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to pivot (-EE z)
   q_arc_axis_ee:       [1.0, 0.0, 0.0]   # EE-frame rotation axis (EE x = roll)
-  q_arc_speed_deg_s: 45.0                # max angular rate for manual Q-arc driving
 
   # ── Confirmation gating ────────────────────────────────────────────────────
   stability_hold_s: 0.5

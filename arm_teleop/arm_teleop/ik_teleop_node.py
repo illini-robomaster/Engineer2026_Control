@@ -49,9 +49,17 @@ from urdf_parser_py import urdf as urdf_parser
 
 import rclpy
 from builtin_interfaces.msg import Duration
+from rclpy.action import ActionClient
+from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from rclpy.node import Node
+from moveit_msgs.action import MoveGroup
+from moveit_msgs.msg import (
+    Constraints,
+    JointConstraint,
+    MoveItErrorCodes,
+    MotionPlanRequest,
+)
 
 
 # ── Pure-numpy FK + geometric Jacobian ───────────────────────────────────────
@@ -94,6 +102,56 @@ def _quat_to_mat3(q: np.ndarray) -> np.ndarray:
         [2*(qx*qy + qz*qw),      1 - 2*(qx**2 + qz**2), 2*(qy*qz - qx*qw)],
         [2*(qx*qz - qy*qw),      2*(qy*qz + qx*qw),   1 - 2*(qx**2 + qy**2)],
     ])
+
+
+def _mat3_to_rpy(R: np.ndarray) -> tuple:
+    """3x3 rotation matrix → extrinsic XYZ RPY (radians), handles gimbal lock."""
+    pitch = float(np.arcsin(np.clip(-R[2, 0], -1.0, 1.0)))
+    if abs(np.cos(pitch)) > 1e-6:
+        roll = float(np.arctan2(R[2, 1], R[2, 2]))
+        yaw  = float(np.arctan2(R[1, 0], R[0, 0]))
+    else:                                   # gimbal lock
+        roll = float(np.arctan2(-R[1, 2], R[1, 1]))
+        yaw  = 0.0
+    return roll, pitch, yaw
+
+
+def _ik_diag_str(chain_data, last_solved, target_pos, target_quat) -> str:
+    """Build a compact one-line diagnostic string for IK failure messages.
+
+    Shows: target xyz/RPY, current EE xyz/RPY, orientation error, joint angles,
+    and a wrist-singularity hint if J5 is near 0.
+    """
+    parts = [f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})']
+
+    if target_quat is not None:
+        tr, tp, ty = _mat3_to_rpy(_quat_to_mat3(target_quat))
+        parts.append(f'tgt_rpy=({np.degrees(tr):.1f},{np.degrees(tp):.1f},{np.degrees(ty):.1f})°')
+
+    if last_solved is not None:
+        p_cur, R_cur, _ = _fk_and_jac(chain_data, np.array(last_solved))
+        cr, cp, cy = _mat3_to_rpy(R_cur)
+        dist = float(np.linalg.norm(target_pos - p_cur))
+        parts.append(f'cur=({p_cur[0]:.3f},{p_cur[1]:.3f},{p_cur[2]:.3f})'
+                     f'  dist={dist*1000:.1f}mm')
+        parts.append(f'cur_rpy=({np.degrees(cr):.1f},{np.degrees(cp):.1f},{np.degrees(cy):.1f})°')
+
+        if target_quat is not None:
+            R_tgt = _quat_to_mat3(target_quat)
+            R_err = R_tgt @ R_cur.T
+            e_r = 0.5 * np.array([R_err[2,1]-R_err[1,2],
+                                   R_err[0,2]-R_err[2,0],
+                                   R_err[1,0]-R_err[0,1]])
+            parts.append(f'ori_err={np.degrees(np.linalg.norm(e_r)):.1f}°')
+
+        j_deg = [float(np.degrees(j)) for j in last_solved]
+        parts.append('joints=' + ' '.join(f'J{i+1}:{v:.1f}°' for i, v in enumerate(j_deg)))
+
+        j5 = j_deg[4] if len(j_deg) > 4 else None
+        if j5 is not None and abs(j5) < 8.0:
+            parts.append(f'!! J5={j5:.1f}° near wrist singularity (J5≈0 → J4/J6 coaxial)')
+
+    return '  |  '.join(parts)
 
 
 def _rpy_to_quat(r: float, p: float, y: float) -> np.ndarray:
@@ -249,6 +307,11 @@ class IkTeleopNode(Node):
         # Higher = more conservative (won't deviate from seed), lower = less biased.
         # 0.0 disables regularization.
         self._ik_seed_regularization = p('ik_seed_regularization', 0.02)
+        # Singularity-aware DLS damping floor for 6D IK.
+        # When sigma_min of the weighted Jacobian falls below sing_threshold,
+        # lambda is raised proportionally to prevent jitter near wrist singularity.
+        self._sing_threshold = p('sing_threshold', 0.05)   # rad/s per rad
+        self._sing_lam_max   = p('sing_lam_max',   0.005)  # max extra damping
 
         # ── Null-space posture control ────────────────────────────────────────
         # Secondary task: pull joints toward q_preferred without disturbing the
@@ -326,6 +389,14 @@ class IkTeleopNode(Node):
             self.get_logger().error(
                 'robot_description parameter is empty -- node will not move the arm.')
 
+        # ── MoveIt joint-space planning ───────────────────────────────────────
+        self._joints_plan_time   = p('joints_plan_time_s',    5.0)
+        self._joints_vel_scale   = p('joints_vel_scale',      0.3)
+        self._joints_accel_scale = p('joints_accel_scale',    0.2)
+        self._mg_client = ActionClient(self, MoveGroup, '/move_action')
+        # Mutex so concurrent plan_joints commands don't race
+        self._plan_joints_lock = threading.Lock()
+
         # ── Socket server (background thread) ────────────────────────────────
         self._srv_thread = threading.Thread(target=self._socket_server, daemon=True)
         self._srv_thread.start()
@@ -365,7 +436,7 @@ class IkTeleopNode(Node):
                 # Target quaternion after ee_ori_offset
                 'off_qx', 'off_qy', 'off_qz', 'off_qw',
                 # IK outcome
-                'result',                          # 6D / POS_ONLY / SNAP / FAIL / DEADBAND / TIMEOUT
+                'result',                          # 6D / POS_ONLY / SNAP / FAIL / JUMP_REJECT / JUMP_REJECT/pos_only
                 'seed',                            # winning seed label
                 'max_jump_rad',                    # largest joint delta from last_solved
                 'vel_clamped',                     # 1 if velocity limiter fired
@@ -488,6 +559,24 @@ class IkTeleopNode(Node):
                     self._target_pos  = None   # stop IK loop from commanding old target
                     self._target_quat = None
                 threading.Thread(target=self._run_homing, daemon=True).start()
+            elif msg['cmd'] == 'joints':
+                import math
+                positions_rad = [math.radians(d) for d in msg.get('positions', [])]
+                duration_s    = float(msg.get('duration', 2.0))
+                if len(positions_rad) == len(self._joint_names):
+                    self._publish_raw_joints(positions_rad, duration_s)
+            elif msg['cmd'] == 'plan_joints':
+                import math
+                positions_rad = [math.radians(d) for d in msg.get('positions', [])]
+                if len(positions_rad) == len(self._joint_names):
+                    if self._plan_joints_lock.acquire(blocking=False):
+                        threading.Thread(
+                            target=self._run_plan_joints,
+                            args=(positions_rad,),
+                            daemon=True,
+                        ).start()
+                    else:
+                        self.get_logger().warn('plan_joints: already active, ignoring')
             return   # not a pose message
 
         # ── Pose message ─────────────────────────────────────────────────────
@@ -506,9 +595,132 @@ class IkTeleopNode(Node):
         except (KeyError, ValueError) as exc:
             self.get_logger().warn(f'Bad pose message: {exc}')
 
+    def _build_joints_goal(self, positions_rad: list) -> MoveGroup.Goal:
+        """Build a MoveGroup joint-space goal from a list of joint angles (rad)."""
+        goal = MoveGroup.Goal()
+        req = MotionPlanRequest()
+        req.group_name                      = 'arm'
+        req.num_planning_attempts           = 5
+        req.allowed_planning_time           = float(self._joints_plan_time)
+        req.max_velocity_scaling_factor     = float(self._joints_vel_scale)
+        req.max_acceleration_scaling_factor = float(self._joints_accel_scale)
+
+        constraints = Constraints()
+        for name, pos in zip(self._joint_names, positions_rad):
+            jc = JointConstraint()
+            jc.joint_name     = name
+            jc.position       = float(pos)
+            jc.tolerance_above = 0.05   # ~3°
+            jc.tolerance_below = 0.05
+            jc.weight         = 1.0
+            constraints.joint_constraints.append(jc)
+        req.goal_constraints = [constraints]
+
+        goal.request = req
+        goal.planning_options.plan_only                          = False
+        goal.planning_options.replan                             = False
+        goal.planning_options.planning_scene_diff.is_diff        = True
+        return goal
+
+    def _run_plan_joints(self, positions_rad: list) -> None:
+        """Plan and execute a joint-space goal via MoveIt (runs in a daemon thread).
+
+        Sets planning_active=True in FK feedback while running so chassis_fsm
+        can poll for completion using the same homing-flag pattern.
+        Releases _plan_joints_lock when done.
+        """
+        self.get_logger().info(
+            f'plan_joints: planning to [{", ".join(f"{r:.3f}" for r in positions_rad)}]')
+
+        with self._fk_feedback_lock:
+            fb = dict(self._fk_feedback)
+            fb['planning_active'] = True
+            fb.pop('planning_ok', None)
+            fb.pop('planning_error_code', None)
+            self._fk_feedback = fb
+
+        try:
+            if not self._mg_client.server_is_ready():
+                self.get_logger().warn(
+                    'plan_joints: /move_action not ready — falling back to raw joints')
+                self._publish_raw_joints(positions_rad, self._joints_plan_time)
+                return
+
+            done   = threading.Event()
+            result = [False]
+
+            def on_goal_accepted(future):
+                handle = future.result()
+                if not handle.accepted:
+                    self.get_logger().warn('plan_joints: goal rejected by MoveGroup')
+                    with self._fk_feedback_lock:
+                        fb = dict(self._fk_feedback)
+                        fb['planning_ok'] = False
+                        fb['planning_error_code'] = -1
+                        self._fk_feedback = fb
+                    done.set()
+                    return
+                handle.get_result_async().add_done_callback(on_result)
+
+            def on_result(future):
+                try:
+                    code = future.result().result.error_code.val
+                    result[0] = (code == MoveItErrorCodes.SUCCESS)
+                    with self._fk_feedback_lock:
+                        fb = dict(self._fk_feedback)
+                        fb['planning_ok'] = result[0]
+                        fb['planning_error_code'] = int(code)
+                        self._fk_feedback = fb
+                    if result[0]:
+                        self.get_logger().info('plan_joints: motion complete')
+                    else:
+                        self.get_logger().warn(f'plan_joints: MoveGroup failed (code={code})')
+                except Exception as exc:
+                    self.get_logger().warn(f'plan_joints: result exception: {exc}')
+                    with self._fk_feedback_lock:
+                        fb = dict(self._fk_feedback)
+                        fb['planning_ok'] = False
+                        fb['planning_error_code'] = -2
+                        self._fk_feedback = fb
+                done.set()
+
+            future = self._mg_client.send_goal_async(self._build_joints_goal(positions_rad))
+            future.add_done_callback(on_goal_accepted)
+
+            if not done.wait(timeout=30.0):
+                self.get_logger().warn('plan_joints: timed out after 30 s')
+        finally:
+            self._plan_joints_lock.release()
+            with self._fk_feedback_lock:
+                fb = dict(self._fk_feedback)
+                fb.pop('planning_active', None)
+                self._fk_feedback = fb
+
+    def _publish_raw_joints(self, positions: list, duration_s: float) -> None:
+        """Publish a JointTrajectory directly from joint-space positions (radians)."""
+        traj = JointTrajectory()
+        traj.header.stamp = self.get_clock().now().to_msg()
+        traj.joint_names  = list(self._joint_names)
+        pt = JointTrajectoryPoint()
+        pt.positions      = list(positions)
+        pt.time_from_start = Duration(
+            sec=int(duration_s),
+            nanosec=int((duration_s % 1) * 1e9),
+        )
+        traj.points = [pt]
+        self._traj_pub.publish(traj)
+
     def _run_homing(self):
         """Spawn homing_node locally (Linux side) and report status via FK feedback."""
         self.get_logger().info('Homing: starting...')
+        # Pre-empt any in-flight IK trajectory so the arm doesn't drift toward
+        # the previous target during the 50 ms traj_duration window before the
+        # homing subprocess takes control.
+        with self._lock:
+            js = dict(self._joint_pos)
+        if len(js) == len(self._joint_names):
+            hold = [js.get(n, 0.0) for n in self._joint_names]
+            self._publish_raw_joints(hold, 0.15)   # 150 ms covers the 50 ms traj_dur
         # Mark homing active in feedback so Mac side pauses streaming
         with self._fk_feedback_lock:
             fb = dict(self._fk_feedback)
@@ -697,6 +909,15 @@ class IkTeleopNode(Node):
             else:
                 lam = max(lam * 0.5, 1e-7)
             prev_err = err_6d_norm
+
+            # Singularity-aware damping floor: when the Jacobian is ill-conditioned
+            # (J5 ≈ 0 / EE z ≈ world z wrist singularity), enforce a minimum lambda
+            # proportional to singularity depth to prevent numerically unstable dq.
+            sigma_min = float(np.linalg.svd(J_w, compute_uv=False)[-1])
+            if sigma_min < self._sing_threshold:
+                sing_lam = self._sing_lam_max * (1.0 - sigma_min / self._sing_threshold) ** 2
+                lam = max(lam, sing_lam)
+                self.get_logger().debug(f'sing sigma_min={sigma_min:.4f} lam={lam:.2e}')
 
             dq = J_w.T @ np.linalg.solve(J_w @ J_w.T + lam * np.eye(6), err_6)
             dq_norm = float(np.linalg.norm(dq))
@@ -993,6 +1214,11 @@ class IkTeleopNode(Node):
                     self.get_logger().debug(
                         f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
                         f'seed={winning_seed}  threshold={self._max_joint_jump}')
+                    self._log_csv_row(
+                        t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
+                        target_pos, raw_quat, target_quat,
+                        'JUMP_REJECT', winning_seed, max_jump, False,
+                        list(result), js_seed)
                     result = None
                     jump_rejected = True
                     self._diag_jump_rejects += 1
@@ -1016,13 +1242,17 @@ class IkTeleopNode(Node):
                 # may not realise orientation is being silently dropped.
                 if self._diag_pos_only_fb in (1, 10, 50) or self._diag_pos_only_fb % 100 == 0:
                     self.get_logger().warn(
-                        f'[ik] orientation unreachable — fell back to pos-only IK '
-                        f'(count={self._diag_pos_only_fb}).  EE orientation is NOT '
-                        f'tracking target.  Check ori_weight or target orientation.')
+                        f'[ik] ORI_UNREACHABLE → pos-only fallback  count={self._diag_pos_only_fb}'
+                        f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
                 # Re-check jump guard for the pos-only solution
                 if self._max_joint_jump > 0.0 and last_solved is not None:
                     max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
                     if max_jump > self._max_joint_jump:
+                        self._log_csv_row(
+                            t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
+                            target_pos, raw_quat, target_quat,
+                            'JUMP_REJECT/pos_only', winning_seed, max_jump, False,
+                            list(result), js_seed)
                         result = None
                         jump_rejected = True
                         self._diag_jump_rejects += 1
@@ -1034,17 +1264,22 @@ class IkTeleopNode(Node):
                 used_snap = True
                 winning_seed = 'snap'
                 self._diag_snaps += 1
+                p_snap, _, _ = _fk_and_jac(self._chain_data, np.array(result))
+                snap_err_mm = float(np.linalg.norm(target_pos - p_snap) * 1000.0)
+                self.get_logger().warn(
+                    f'[ik] SNAP: position partially unreachable — moved to workspace edge'
+                    f'  |  snap_err={snap_err_mm:.1f}mm from target'
+                    f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
 
         if result is None:
             if should_log:
                 self._ik_fail_log_time = t_tick_start
+                cause = ('jump_guard blocked all solutions' if jump_rejected
+                         else 'position outside workspace' if not self._ctrl_ori
+                         else 'position AND orientation both unreachable')
                 self.get_logger().error(
-                    f'IK: target truly unreachable  '
-                    f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})  '
-                    f'ctrl_ori={self._ctrl_ori}  '
-                    f'jump_rejected={jump_rejected}  '
-                    f'Check: (1) target in workspace?  (2) orientation reachable?  '
-                    f'(3) increase ori_weight if pos converges but ori does not')
+                    f'[ik] FAIL: truly unreachable  cause={cause}'
+                    f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
             self._diag_fails += 1
             self._log_csv_row(
                 t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
@@ -1095,20 +1330,13 @@ class IkTeleopNode(Node):
             f'vel_clamp={vel_clamped}  snap={used_snap}  age={age*1000:.0f}ms  '
             f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})')
 
-        traj              = JointTrajectory()
-        traj.header.stamp = self.get_clock().now().to_msg()
-        traj.joint_names  = list(self._joint_names)
-        pt                = JointTrajectoryPoint()
-        pt.positions      = list(result)
-        pt.time_from_start = Duration(sec=0, nanosec=int(self._traj_dur * 1e9))
-        traj.points = [pt]
-        self._traj_pub.publish(traj)
+        self._publish_raw_joints(list(result), self._traj_dur)
 
         with self._lock:
             self._last_solved_joints = list(result)
         self._diag_solves += 1
 
-        # Feedback: FK position of solved joints + IK quality flag
+        # Feedback: FK position of solved joints + IK quality flag + joint angles
         _p_sol, _, _ = _fk_and_jac(self._chain_data, np.array(result))
         with self._fk_feedback_lock:
             self._fk_feedback = {
@@ -1116,6 +1344,7 @@ class IkTeleopNode(Node):
                 'fk_y': float(_p_sol[1]),
                 'fk_z': float(_p_sol[2]),
                 'ik_ok': not used_snap,   # False when arm snapped to nearest reachable
+                **{f'j{i+1}': float(result[i]) for i in range(len(result))},
             }
 
         # Determine result type label for CSV

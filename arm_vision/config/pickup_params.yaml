@@ -6,10 +6,11 @@ pickup:
   arc_radius_mm: 130.0                  # radial storage fixture radius
   arc_center_dir_ee: [0.0, 0.0, -1.0]  # EE-frame direction from EE to arc pivot (-EE z)
   arc_axis_ee: [1.0, 0.0, 0.0]         # EE-frame rotation axis (EE x = roll)
+  # ARC_ALIGN uses SpaceMouse Y (left/right) to drive the arc angle
 
-  # After ARC_ALIGN: auto-lift along EE z-axis before confirmation gate
-  lift_distance_mm: 80.0
-  lift_speed_m_s: 0.05
+  # After ARC_ALIGN:
+  #   GRAB  — push SpaceMouse X forward to insert EE into energy unit slot
+  #   REMOVE — push SpaceMouse Z to lift along EE-Z axis (arm's own Z)
 
   stability_hold_s: 0.5
   stability_threshold_m: 0.003

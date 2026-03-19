@@ -18,6 +18,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
+import os
 import sys
 import time
 from enum import Enum, auto
@@ -29,6 +31,14 @@ from scipy.spatial.transform import Rotation
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _joints_line(feedback: dict) -> str:
+    """Format joint angles (rad → deg) from feedback into a single display line."""
+    if not any(f'j{i}' in feedback for i in range(1, 7)):
+        return '  J  (no joint feedback yet)'
+    vals = [float(np.degrees(feedback.get(f'j{i}', 0.0))) for i in range(1, 7)]
+    return ('  J ' + '  '.join(f'J{i}{v:+7.1f}°' for i, v in enumerate(vals, 1)))
+
+
 def _bar(value: float, lo: float, hi: float, width: int = 10) -> str:
     """Return a filled bar representing *value* within [lo, hi]."""
     span  = hi - lo if hi != lo else 1.0
@@ -37,8 +47,9 @@ def _bar(value: float, lo: float, hi: float, width: int = 10) -> str:
     return '█' * filled + '░' * (width - filled)
 
 
-_VIZ_LINES     = 4   # number of lines render_pose prints
-_ASM_VIZ_LINES = 6   # number of lines render_assembly / render_pickup print
+_VIZ_LINES        = 5   # number of lines render_pose prints
+_ASM_VIZ_LINES    = 7   # number of lines render_assembly / render_pickup print
+_CHASSIS_VIZ_LINES = 5  # number of lines render_chassis prints
 
 
 def render_pose(
@@ -86,6 +97,7 @@ def render_pose(
     print(line1)
     print(line2)
     print(line4)
+    print(_joints_line(feedback).ljust(len(sep)))
 
 
 def render_assembly(
@@ -123,6 +135,7 @@ def render_assembly(
         f'  Cmd: X {pos[0]:+7.3f}  Y {pos[1]:+7.3f}  Z {pos[2]:+7.3f}',
         hint,
         fb_line,
+        _joints_line(feedback),
     ]
 
     if not first:
@@ -165,10 +178,63 @@ def render_pickup(
         f'  Cmd: X {pos[0]:+7.3f}  Y {pos[1]:+7.3f}  Z {pos[2]:+7.3f}',
         hint,
         fb_line,
+        _joints_line(feedback),
     ]
 
     if not first:
         print(f'\033[{_ASM_VIZ_LINES}A', end='')
+
+    for line in lines:
+        print(line.ljust(width))
+
+
+def render_chassis(
+    fsm,
+    feedback: dict,
+    mode_header: str = '',
+    first: bool = False,
+) -> None:
+    """Overwrite terminal lines with STORE/FETCH mode status display."""
+    from chassis_fsm import ChassisState, ChassisOperation
+
+    width = 60
+    sep = '─' * width
+
+    step_names = {
+        ChassisState.IDLE:        'IDLE — press L/R to start',
+        ChassisState.HOMING_PRE:  'HOMING (pre) …',
+        ChassisState.STEP_1:      'MOVING → WP1',
+        ChassisState.STEP_2:      'MOVING → WP2',
+        ChassisState.PAUSING:     'PAUSING …',
+        ChassisState.CLAW_OP:     'CLAW OP',
+        ChassisState.STEP_3:      'MOVING → WP3',
+        ChassisState.HOMING_POST: 'HOMING (post) …',
+        ChassisState.DONE:        'DONE',
+    }
+
+    op_str   = fsm.operation.name if fsm.operation else '—'
+    side_str = fsm.side.upper() if fsm.side else '—'
+    state_str = step_names.get(fsm.state, str(fsm.state))
+
+    if 'fk_x' in feedback:
+        ik_str = 'OK' if feedback.get('ik_ok', True) else 'SNAP/FAIL'
+        fb_line = (f'  FK  X {feedback["fk_x"]:+7.3f}'
+                   f'  Y {feedback["fk_y"]:+7.3f}'
+                   f'  Z {feedback["fk_z"]:+7.3f}  IK:{ik_str}')
+    else:
+        fb_line = '  FK  (no feedback — is IK node running?)'
+
+    header = mode_header if mode_header else f'  [{op_str}] Side: {side_str}'
+    lines = [
+        sep,
+        header,
+        f'  State: {state_str}',
+        fb_line,
+        _joints_line(feedback),
+    ]
+
+    if not first:
+        print(f'\033[{_CHASSIS_VIZ_LINES}A', end='')
 
     for line in lines:
         print(line.ljust(width))
@@ -254,6 +320,8 @@ class TeleopMode(Enum):
     MANUAL   = auto()
     ASSEMBLY = auto()
     PICKUP   = auto()
+    STORE    = auto()
+    FETCH    = auto()
 
 
 class ButtonComboDetector:
@@ -323,6 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Path to assembly_params.yaml (enables assembly mode)')
     p.add_argument('--pickup',   default=None,
                    help='Path to pickup_params.yaml (enables pickup mode)')
+    p.add_argument('--chassis',  default=None,
+                   help='Path to chassis_params.yaml (enables STORE/FETCH modes)')
     p.add_argument('--difficulty', type=int, default=None,
                    help='Override difficulty level (1-4)')
     p.add_argument('--q-angle', type=float, default=None,
@@ -334,6 +404,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--handle-offset', type=float, nargs=3,
                    default=[-108.0, 0.0, 0.0], metavar=('X', 'Y', 'Z'),
                    help='Handle offset in EE frame mm (default: -108 0 0)')
+    p.add_argument('--log-dir', default='.', metavar='DIR',
+                   help='Directory for P-arc session .log files (default: current dir, '
+                        'pass empty string to disable)')
     return p
 
 
@@ -397,12 +470,22 @@ def main():
         pickup_fsm = PickupFSM(pickup_cfg)
         print(f'[pickup] R={pickup_cfg.arc_radius_mm}mm, yaw={pickup_cfg.init_yaw_deg}°')
 
+    chassis_fsm = None
+    if args.chassis:
+        from chassis_fsm import ChassisFSM, ChassisOperation, load_chassis_config
+        _chassis_cfg = load_chassis_config(args.chassis)
+        chassis_fsm  = ChassisFSM(client, _chassis_cfg)
+        print(f'[chassis] Loaded config from {args.chassis}')
+
     # ── Build available mode cycle ─────────────────────────────────────────
     available_modes = [TeleopMode.MANUAL]
     if asm_fsm is not None:
         available_modes.append(TeleopMode.ASSEMBLY)
     if pickup_fsm is not None:
         available_modes.append(TeleopMode.PICKUP)
+    if chassis_fsm is not None:
+        available_modes.append(TeleopMode.STORE)
+        available_modes.append(TeleopMode.FETCH)
 
     current_mode = TeleopMode.MANUAL
     mode_idx = 0
@@ -417,6 +500,8 @@ def main():
             asm_fsm.emergency_reset()
         if pickup_fsm is not None:
             pickup_fsm.emergency_reset()
+        if chassis_fsm is not None:
+            chassis_fsm.emergency_reset()
 
         # Resync EE pose
         if client is not None:
@@ -445,11 +530,22 @@ def main():
     _homing_t            = 0.0
     _ik_was_failing      = False
     # Homing requires RIGHT held for this long to prevent accidental triggers
-    HOMING_HOLD_S   = 2.0
-    _right_hold_t   = None   # monotonic time when RIGHT was first pressed
-    _right_hold_fired = False  # True once the hold-trigger fires (until release)
+    HOMING_HOLD_S        = 2.0
+    ASSEMBLY_EXIT_HOLD_S = 1.5   # shorter hold exits assembly FSM → MANUAL
+    _right_hold_t         = None   # monotonic time when RIGHT was first pressed
+    _right_hold_fired     = False  # True once the hold-trigger fires (until release)
+    _right_asm_exit_fired = False  # True once the 1.5s assembly-exit fires (until release)
 
     combo_detector = ButtonComboDetector()
+
+    # ── Approach discrete-step rotation ───────────────────────────────────
+    # Twist and Y-linear axes fire a single 5° step when pushed past the
+    # threshold.  The axis must return to neutral before firing again.
+    APPROACH_STEP_DEG       = 5.0
+    APPROACH_STEP_THRESHOLD = 0.8   # fraction of SM max (0–1)
+    _approach_roll_state    = 0     # last fired direction: -1, 0, or +1
+    _approach_pitch_state   = 0
+    _approach_yaw_state     = 0
 
     # ── P-arc recording state ──────────────────────────────────────────────
     _p_arc_recording  = False
@@ -457,6 +553,11 @@ def main():
     _p_arc_start_rot  = None
     _p_arc_prev_state = None
     _handle_offset_ee = np.array(args.handle_offset, dtype=float)
+
+    # ── P-arc session log ──────────────────────────────────────────────────
+    _parc_log_file: object = None   # open file handle, or None when not logging
+    _parc_log_path: str    = ''
+    _parc_log_t0:  float   = 0.0
 
     mode_names = ' / '.join(m.name for m in available_modes)
     print(f'[spacemouse] Modes available: {mode_names}')
@@ -508,11 +609,13 @@ def main():
             # Homing requires RIGHT held for HOMING_HOLD_S seconds to prevent
             # accidental triggers during normal spacemouse operation.
             if right_edge:
-                _right_hold_t    = now
-                _right_hold_fired = False
+                _right_hold_t         = now
+                _right_hold_fired     = False
+                _right_asm_exit_fired = False
             elif not right_held:
-                _right_hold_t    = None
-                _right_hold_fired = False
+                _right_hold_t         = None
+                _right_hold_fired     = False
+                _right_asm_exit_fired = False
 
             _right_homing_trigger = (
                 _right_hold_t is not None
@@ -522,9 +625,20 @@ def main():
             if _right_homing_trigger:
                 _right_hold_fired = True  # fire exactly once per hold
 
-            # ── Homing (RIGHT held 3 s in any mode) ──────────────────────
+            # Assembly exit: 1.5 s hold → emergency-reset FSM and return to MANUAL.
+            # Also marks _right_hold_fired so the 2 s homing doesn't chain.
+            _right_asm_exit = (
+                current_mode == TeleopMode.ASSEMBLY
+                and _right_hold_t is not None
+                and not _right_asm_exit_fired
+                and (now - _right_hold_t) >= ASSEMBLY_EXIT_HOLD_S
+            )
+            if _right_asm_exit:
+                _right_asm_exit_fired = True
+                _right_hold_fired     = True   # suppress the 2 s homing
+
+            # ── Homing (RIGHT held 2 s in MANUAL or PICKUP) ───────────────
             _right_for_homing = _right_homing_trigger and current_mode == TeleopMode.MANUAL
-            _right_for_asm    = _right_homing_trigger and current_mode == TeleopMode.ASSEMBLY
             _right_for_pickup = _right_homing_trigger and current_mode == TeleopMode.PICKUP
 
             # ── Mode dispatch ─────────────────────────────────────────────
@@ -532,18 +646,12 @@ def main():
             if current_mode == TeleopMode.ASSEMBLY and asm_fsm is not None:
                 from assembly_fsm import AssemblyState
 
-                if _right_for_asm and not _homing_active:
+                if _right_asm_exit:
                     asm_fsm.emergency_reset()
                     _p_arc_recording = False
-                    ee_rot = Rotation.from_quat(cfg['init_quat'])
-                    if client is not None:
-                        client.send_home()
-                        _homing_active       = True
-                        _homing_seen_running = False
-                        _homing_t            = time.monotonic()
-                        print('\n[spacemouse] Homing command sent — streaming paused')
-                    else:
-                        print('\n[spacemouse] No socket — skipping homing')
+                    current_mode = TeleopMode.MANUAL
+                    mode_idx     = available_modes.index(TeleopMode.MANUAL)
+                    print('\n[spacemouse] Assembly exited — back to MANUAL')
 
                 # ── P-arc recording: detect entry into AUTO_ROTATE_P ──────
                 if (args.record_p_arc
@@ -556,12 +664,35 @@ def main():
                     _p_arc_start_rot  = ee_rot
                     print('\n[P-ARC RECORD] Draw the arc (EE x-z plane, EE y rotation only).')
                     print('[P-ARC RECORD] Press LEFT at the end pose to derive params.')
+                    if args.log_dir:
+                        os.makedirs(args.log_dir, exist_ok=True)
+                        _ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                        _parc_log_path = os.path.join(args.log_dir, f'parc_{_ts}.log')
+                        _parc_log_file = open(_parc_log_path, 'w', buffering=1)
+                        _parc_log_t0   = time.monotonic()
+                        _parc_log_file.write(f'# P-arc session: {datetime.datetime.now().isoformat()}\n')
+                        _parc_log_file.write(f'# assembly: {args.assembly}\n')
+                        _parc_log_file.write(
+                            f'# init_pos: {ee_pos[0]:.4f} {ee_pos[1]:.4f} {ee_pos[2]:.4f}\n')
+                        _parc_log_file.write(
+                            '# Columns: t_s'
+                            ' | sent_x sent_y sent_z'
+                            ' | qw qx qy qz'
+                            ' | fk_x fk_y fk_z'
+                            ' | ik_ok'
+                            ' | j1 j2 j3 j4 j5 j6\n')
+                        print(f'[P-ARC LOG] Writing to {_parc_log_path}')
                 _p_arc_prev_state = asm_fsm.state
 
                 # ── Button handling ───────────────────────────────────────
                 if event == 'LEFT':
                     if _p_arc_recording and asm_fsm.state == AssemblyState.AUTO_ROTATE_P:
                         _p_arc_recording = False
+                        if _parc_log_file is not None:
+                            _parc_log_file.write(f'# session ended at t={time.monotonic()-_parc_log_t0:.3f}s\n')
+                            _parc_log_file.close()
+                            _parc_log_file = None
+                            print(f'[P-ARC LOG] Saved: {_parc_log_path}')
                         analyze_p_arc(_p_arc_start_pos, _p_arc_start_rot,
                                       ee_pos, ee_rot, _handle_offset_ee)
                         asm_fsm.advance()   # AUTO_ROTATE_P is now in _ADVANCEABLE
@@ -593,17 +724,107 @@ def main():
                     ee_pos = np.clip(ee_pos + dp_constrained, cfg['pos_min'], cfg['pos_max'])
                     ee_rot = Rotation.from_rotvec(dr_constrained) * ee_rot
                     # Do NOT tick the FSM — keeps the arc from auto-completing
+                    if _parc_log_file is not None:
+                        _fb  = client.feedback if client is not None else {}
+                        _q   = ee_rot.as_quat()   # [x, y, z, w]
+                        _j   = [_fb.get(f'j{_i}', 0.0) for _i in range(1, 7)]
+                        _parc_log_file.write(
+                            f'{time.monotonic() - _parc_log_t0:.3f}  '
+                            f'{ee_pos[0]:.4f} {ee_pos[1]:.4f} {ee_pos[2]:.4f}  '
+                            f'{_q[3]:.4f} {_q[0]:.4f} {_q[1]:.4f} {_q[2]:.4f}  '
+                            f'{_fb.get("fk_x", 0.0):.4f} {_fb.get("fk_y", 0.0):.4f} {_fb.get("fk_z", 0.0):.4f}  '
+                            f'{int(_fb.get("ik_ok", 1))}  '
+                            f'{_j[0]:.4f} {_j[1]:.4f} {_j[2]:.4f} {_j[3]:.4f} {_j[4]:.4f} {_j[5]:.4f}\n'
+                        )
                 else:
-                    if asm_fsm.translation_allowed:
-                        ee_pos = np.clip(ee_pos + delta_p * spd, cfg['pos_min'], cfg['pos_max'])
-
                     rot_override = asm_fsm.rotation_override
+
+                    if asm_fsm.translation_allowed:
+                        if asm_fsm.state == AssemblyState.APPROACH and rot_override is not None:
+                            # EE-frame navigation: project SpaceMouse axes onto the
+                            # current EE frame so that:
+                            #   SM +X (push forward) → EE −Z (approach axis)
+                            #   SM +Y (push right)   → EE +Y (lateral)
+                            #   SM +Z (push down)    → EE +X (vertical)
+                            R = rot_override.as_matrix()
+                            dp = (delta_p[0] * (-R[:, 2])   # SM X → EE −Z
+                                + delta_p[1] * R[:, 1]       # SM Y → EE +Y
+                                + delta_p[2] * R[:, 0])      # SM Z → EE +X
+                            ee_pos = np.clip(ee_pos + dp * spd, cfg['pos_min'], cfg['pos_max'])
+                        else:
+                            ee_pos = np.clip(ee_pos + delta_p * spd, cfg['pos_min'], cfg['pos_max'])
+
                     if rot_override is not None:
                         ee_rot = rot_override
 
                     sm_active = float(np.linalg.norm(sm_lin)) > cfg['deadband']
-                    asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
-                                 sm_lin_delta=delta_p * spd, sm_rot_delta=delta_r * spd, dt=dt)
+
+                    if asm_fsm.state == AssemblyState.APPROACH:
+                        # Discrete-step rotation for APPROACH (EE frame, right-multiply):
+                        #   SM twist     (ang[2])  → EE roll  — 5° per edge trigger
+                        #   SM pitch     (ang[1])  → EE pitch — 5° per edge trigger
+                        #   SM roll tilt (ang[0])  → EE yaw   — 5° per edge trigger
+                        # Note: lin[1] (forward push) was previously used for yaw but
+                        # conflicts with approach translation and rarely reaches the
+                        # 0.8 threshold during normal use — replaced with ang[0] roll tilt.
+                        #
+                        # Edge rule: fires once when the axis crosses APPROACH_STEP_THRESHOLD.
+                        # Re-arms only when the axis returns to 0.0 (below deadband) —
+                        # NOT when it merely dips below the threshold.  Without this
+                        # hysteresis the state resets whenever the analog value briefly
+                        # oscillates around 0.8, causing continuous unintended stepping.
+                        _step_rad = np.radians(APPROACH_STEP_DEG)
+
+                        _twist = sm_ang[2]   # raw [-1, 1] after deadband
+                        if abs(_twist) >= APPROACH_STEP_THRESHOLD:
+                            _d = 1 if _twist > 0 else -1
+                            if _approach_roll_state != _d:
+                                _approach_roll_state = _d
+                                _roll_step = -_d * _step_rad  # inverted: CW twist → positive EE roll
+                            else:
+                                _roll_step = 0.0
+                        else:
+                            if _twist == 0.0:   # re-arm only at true neutral (below deadband)
+                                _approach_roll_state = 0
+                            _roll_step = 0.0
+
+                        _pitch = sm_ang[1]   # raw [-1, 1] after deadband
+                        if abs(_pitch) >= APPROACH_STEP_THRESHOLD:
+                            _d = 1 if _pitch > 0 else -1
+                            if _approach_pitch_state != _d:
+                                _approach_pitch_state = _d
+                                _pitch_step = _d * _step_rad
+                            else:
+                                _pitch_step = 0.0
+                        else:
+                            if _pitch == 0.0:   # re-arm only at true neutral (below deadband)
+                                _approach_pitch_state = 0
+                            _pitch_step = 0.0
+
+                        _roll_tilt = sm_ang[0]   # state.roll — tilt left/right, raw [-1, 1] after deadband
+                        if abs(_roll_tilt) >= APPROACH_STEP_THRESHOLD:
+                            _d = 1 if _roll_tilt > 0 else -1
+                            if _approach_yaw_state != _d:
+                                _approach_yaw_state = _d
+                                _yaw_step = _d * _step_rad
+                            else:
+                                _yaw_step = 0.0
+                        else:
+                            if _roll_tilt == 0.0:   # re-arm only at true neutral (below deadband)
+                                _approach_yaw_state = 0
+                            _yaw_step = 0.0
+
+                        _sm_rot_approach = np.array([
+                            _roll_step,    # twist      → EE roll  (discrete 5°)
+                            _pitch_step,   # pitch      → EE pitch (discrete 5°)
+                            _yaw_step,     # roll tilt  → EE yaw   (discrete 5°)
+                        ])
+                        asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
+                                     sm_lin_delta=delta_p * spd,
+                                     sm_rot_delta=_sm_rot_approach, dt=dt)
+                    else:
+                        asm_fsm.tick(ee_pos, ee_rot, sm_active=sm_active,
+                                     sm_lin_delta=delta_p * spd, sm_rot_delta=delta_r * spd, dt=dt)
 
                     pos_override = asm_fsm.position_override
                     if pos_override is not None:
@@ -648,6 +869,25 @@ def main():
                 pos_override = pickup_fsm.position_override
                 if pos_override is not None:
                     ee_pos = pos_override
+
+            elif current_mode in (TeleopMode.STORE, TeleopMode.FETCH) and chassis_fsm is not None:
+                from chassis_fsm import ChassisOperation
+                _chassis_op = (ChassisOperation.STORE
+                               if current_mode == TeleopMode.STORE
+                               else ChassisOperation.FETCH)
+                if not chassis_fsm.is_active:
+                    left_pressed  = (event == 'LEFT')
+                    right_pressed = (event == 'RIGHT')
+                    if left_pressed:
+                        chassis_fsm.start('left', _chassis_op)
+                    elif right_pressed:
+                        chassis_fsm.start('right', _chassis_op)
+                _fb_chassis = client.feedback if client is not None else {}
+                chassis_fsm.tick(_fb_chassis, dt)
+                if chassis_fsm.done:
+                    current_mode = TeleopMode.MANUAL
+                    mode_idx = available_modes.index(TeleopMode.MANUAL)
+                    chassis_fsm.emergency_reset()
 
             else:
                 # ── MANUAL mode ───────────────────────────────────────────
@@ -750,6 +990,9 @@ def main():
                 elif current_mode == TeleopMode.PICKUP and pickup_fsm is not None:
                     render_pickup(pickup_fsm, ee_pos, _fb,
                                   mode_header=mode_hdr, first=(tick == 0))
+                elif current_mode in (TeleopMode.STORE, TeleopMode.FETCH) and chassis_fsm is not None:
+                    render_chassis(chassis_fsm, _fb,
+                                   mode_header=mode_hdr, first=(tick == 0))
                 else:
                     render_pose(ee_pos, sm_ang, cfg['pos_min'], cfg['pos_max'],
                                 cfg['init_pos'], _fb,

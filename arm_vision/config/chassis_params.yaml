@@ -1,0 +1,15 @@
+chassis:
+  pause_s: 1.5           # pause between WP2 and WP3 (store) or WP3 and WP2 (fetch)
+  # move_duration_s removed — waypoint motion is now driven by MoveIt planning;
+  # the FSM polls planning_active feedback instead of counting down a fixed timer.
+
+  # Joint angles in degrees [J1, J2, J3, J4, J5, J6]
+  # Placeholders — calibrate on hardware before use.
+  left:
+      wp1: [-79.5, -49.8, -73.3, 151.4, 2.3, -123.9]   # Move Energy Unit above the slot
+      wp2: [-79.5, -49.8, -73.3, 151.4, 2.3, -123.9]   # Insert into storage slot on chassis
+      wp3: [-79.5, -49.8, -73.3, 151.4, 2.3, -123.9]   # claw operates here
+  right:
+      wp1: [-79.6, -49.9, -73.4, 151.4, 2.3, -123.9]   # Move Energy Unit above the slot
+      wp2: [-79.6, -49.9, -73.4, 151.4, 2.3, -123.9]   # Insert into storage slot on chassis
+      wp3: [-79.6, -49.9, -73.4, 151.4, 2.3, -123.9]   # claw opened then moveout, followed by homing

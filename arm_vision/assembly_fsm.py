@@ -32,6 +32,7 @@ class AssemblyState(Enum):
     APPROACH        = auto()  # human: translate toward core
     INSERT          = auto()  # human: push into core
     LIFT            = auto()  # auto: move along EE x-axis
+    LIFT_CONFIRM    = auto()  # human: verify lift position; LEFT to continue
     AUTO_ROTATE_P   = auto()  # auto: 90° arc (169mm radius)
     AUTO_ROTATE_Q   = auto()  # auto: arc to target angle (60mm radius)
     RELEASE         = auto()  # human: withdraw EE backward along EE x-axis
@@ -51,6 +52,7 @@ _TRANSLATION_ALLOWED = frozenset({
 _ADVANCEABLE = frozenset({
     AssemblyState.APPROACH,
     AssemblyState.INSERT,
+    AssemblyState.LIFT_CONFIRM,    # LEFT to confirm lift position and continue
     AssemblyState.AUTO_ROTATE_P,   # LEFT to finish when in record-p-arc mode
     AssemblyState.AUTO_ROTATE_Q,   # manual arc: LEFT when satisfied
     AssemblyState.RELEASE,         # LEFT when withdrawn far enough
@@ -61,13 +63,16 @@ DIFFICULTY_STAGES: dict[int, list[AssemblyState]] = {
     1: [AssemblyState.APPROACH, AssemblyState.INSERT,
         AssemblyState.READY_CONFIRM],
     2: [AssemblyState.APPROACH, AssemblyState.INSERT,
-        AssemblyState.LIFT, AssemblyState.READY_CONFIRM],
+        AssemblyState.LIFT, AssemblyState.LIFT_CONFIRM,
+        AssemblyState.READY_CONFIRM],
     3: [AssemblyState.APPROACH, AssemblyState.INSERT,
-        AssemblyState.LIFT, AssemblyState.AUTO_ROTATE_P,
+        AssemblyState.LIFT, AssemblyState.LIFT_CONFIRM,
+        AssemblyState.AUTO_ROTATE_P,
         AssemblyState.AUTO_ROTATE_Q, AssemblyState.RELEASE,
         AssemblyState.READY_CONFIRM],
     4: [AssemblyState.APPROACH, AssemblyState.INSERT,
-        AssemblyState.LIFT, AssemblyState.AUTO_ROTATE_P,
+        AssemblyState.LIFT, AssemblyState.LIFT_CONFIRM,
+        AssemblyState.AUTO_ROTATE_P,
         AssemblyState.AUTO_ROTATE_Q, AssemblyState.RELEASE,
         AssemblyState.READY_CONFIRM],
 }
@@ -386,7 +391,8 @@ class AssemblyFSM:
             AssemblyState.APPROACH: 'Translate + rotate yaw to align. LEFT when ready.',
             AssemblyState.INSERT: 'Push to insert. Press LEFT when seated.',
             AssemblyState.LIFT: 'Auto-lifting +Z...',
-            AssemblyState.AUTO_ROTATE_P: f'Arc P (85mm, 90deg)...',
+            AssemblyState.LIFT_CONFIRM: 'Lift done — check position. LEFT to continue.',
+            AssemblyState.AUTO_ROTATE_P: f'Arc P (161mm, 90deg)...',
             AssemblyState.AUTO_ROTATE_Q: f'Roll arc Q (60mm, target {self._cfg.q_target_deg}deg) — push L/R',
             AssemblyState.RELEASE: 'Withdraw EE backward (EE -X). LEFT when clear.',
             AssemblyState.READY_CONFIRM: 'Hold steady. Press LEFT to confirm.',
@@ -498,12 +504,14 @@ class AssemblyFSM:
         self._recent_positions.clear()
 
     def _tick_approach(self, sm_rot_delta: np.ndarray, dt: float) -> None:
-        """Ramp pitch toward init_pitch; all three SpaceMouse axes modify orientation.
+        """Ramp pitch toward init_pitch; SpaceMouse axes rotate in the EE frame.
 
-        Pitch auto-ramp is applied as an incremental world-Y rotation so it
-        composes naturally with any roll/yaw the operator is applying simultaneously.
-        SpaceMouse angular deltas (roll, pitch, yaw) are then applied on top as
-        small incremental world-frame rotations.
+        Pitch auto-ramp is applied as a world-Y rotation (automatic, not felt by
+        operator).  SpaceMouse angular deltas are right-multiplied (EE-frame) so
+        the axes always mean the same thing relative to where the EE is pointing:
+          sm.roll  (tilt L/R)  → rotate about EE x-axis
+          sm.pitch (tilt F/B)  → rotate about EE y-axis
+          sm.yaw   (twist)     → rotate about EE z-axis
         """
         target = self._cfg.init_pitch_deg
         speed = self._cfg.approach_orient_speed_deg_s
@@ -513,15 +521,11 @@ class AssemblyFSM:
             ramp = Rotation.from_euler('y', -delta_pitch, degrees=True)
             self._current_rot = ramp * self._current_rot
 
-        # World-frame left-multiply — identical to manual mode.
-        # Because the EE is pitched 90° (EE x → world Z), the same physical
-        # SpaceMouse gestures naturally produce the right rotations:
-        #   sm.roll  (tilt L/R)  → world X  (tips the insertion axis sideways)
-        #   sm.pitch (tilt F/B)  → world Y  (tips the insertion axis fwd/back)
-        #   sm.yaw   (twist)     → world -Z (spins around the vertical/insertion axis)
-        self._current_rot = Rotation.from_rotvec(sm_rot_delta) * self._current_rot
+        # EE-frame right-multiply: SpaceMouse delta is expressed in the EE's
+        # own axes, so control feels consistent regardless of EE orientation.
+        self._current_rot = self._current_rot * Rotation.from_rotvec(sm_rot_delta)
 
-        # Track yaw: world-Z rotation is driven by sm_rot_delta[2] (= -sm.yaw via ang_map).
+        # Track yaw (approximate — sm_rot_delta[2] ≈ world-Z when pitch is small).
         self._approach_yaw_deg += np.degrees(sm_rot_delta[2])
 
     def _tick_auto_lift(self, ee_pos: np.ndarray, ee_rot: Rotation,

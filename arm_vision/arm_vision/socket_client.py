@@ -8,7 +8,8 @@ Protocol: newline-delimited JSON (both directions)
     {"x": 0.1, "y": 0.2, "z": 0.3, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
 
   ROS → Mac (~10 Hz):
-    {"fk_x": 0.526, "fk_y": 0.0, "fk_z": 0.396, "ik_ok": true}
+    {"fk_x": 0.526, "fk_y": 0.0, "fk_z": 0.396, "ik_ok": true,
+     "j1": 0.0, "j2": 0.3, "j3": 1.5, "j4": 0.0, "j5": 0.0, "j6": 0.0}
 
 The client automatically reconnects if the connection is lost.
 """
@@ -100,6 +101,41 @@ class PoseSocketClient:
             except OSError:
                 pass
 
+    def send_joints(self, positions_deg: list, duration_s: float):
+        """Send a joint-space target (degrees) with a motion duration."""
+        line = json.dumps({
+            'cmd': 'joints',
+            'positions': positions_deg,
+            'duration': duration_s,
+        }) + '\n'
+        if not self._send(line):
+            try:
+                self._connect(_RECONNECT_TIMEOUT)
+                self._send(line)
+            except OSError:
+                pass
+
+    def send_plan_joints(self, positions_deg: list):
+        """Send a joint-space target (degrees) to be executed via MoveIt planning.
+
+        The ROS node will plan a collision-free trajectory with OMPL and execute
+        it, reporting progress via planning_active=True/False in the FK feedback.
+        """
+        line = json.dumps({
+            'cmd': 'plan_joints',
+            'positions': positions_deg,
+        }) + '\n'
+        if not self._send(line):
+            try:
+                self._connect(_RECONNECT_TIMEOUT)
+                self._send(line)
+            except OSError:
+                pass
+
+    def send_claw(self, open: bool):
+        """Stub — claw control via separate channel (not yet wired)."""
+        pass  # TODO: wire to UART / separate topic
+
     @property
     def feedback(self) -> dict:
         """Latest FK feedback from the ROS node.
@@ -107,6 +143,7 @@ class PoseSocketClient:
         Keys present when IK node is connected and has solved at least once:
           fk_x, fk_y, fk_z  — FK end-effector position (metres)
           ik_ok              — True when IK converged; False when snapped or failed
+          j1 … j6           — solved joint angles (radians)
         Returns an empty dict until the first feedback message arrives.
         """
         with self._feedback_lock:

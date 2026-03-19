@@ -86,6 +86,15 @@ ik_teleop_node:
     # Kept at 0.0 for parameter compatibility.
     ik_seed_regularization: 0.0
 
+    # Singularity-aware DLS damping floor (wrist singularity / J5 ≈ 0 jitter fix).
+    # When the smallest singular value of the weighted Jacobian drops below
+    # sing_threshold, lambda is raised quadratically up to sing_lam_max.
+    # Lower sing_threshold = only damp deep singularities.
+    # Higher sing_lam_max  = more conservative but slightly slower convergence.
+    # Tune sing_threshold by observing logged sigma_min at the singularity boundary.
+    sing_threshold: 0.05   # rad/s per rad
+    sing_lam_max:   0.005  # dimensionless (added to lambda in DLS solve)
+
     # Static orientation offset applied to incoming target quaternion (right-multiplied).
     # Compensates for the mismatch between the teleop's zero orientation and the
     # URDF End_Effector frame (Joint6 has rpy="1.5707 0 1.5707" baked in).

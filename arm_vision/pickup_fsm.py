@@ -3,13 +3,16 @@ Pickup FSM — shared-autonomy state machine for grabbing energy units from a
 passive radial storage fixture (R≈130mm, center axis parallel to ground).
 
 States:
-    IDLE → APPROACH → ARC_ALIGN → LIFT_EE → CONFIRM → CONFIRMED
-                                                      → ABORTED
+    IDLE → APPROACH → ARC_ALIGN → GRAB → REMOVE → CONFIRM → CONFIRMED
+                                                            → ABORTED
 
 - APPROACH:   operator translates EE toward fixture; pitch auto-ramps; yaw fixed.
-- ARC_ALIGN:  SpaceMouse X-axis (push forward/back) drives arc angle around
-              the fixture; EE x stays horizontal throughout.
-- LIFT_EE:    auto: move EE 80mm along its own z-axis (lifts off the slot).
+- ARC_ALIGN:  SpaceMouse Y-axis (push left/right) drives arc angle around the
+              fixture; EE x stays horizontal throughout.  LEFT to advance.
+- GRAB:       operator pushes EE forward along EE-X axis (SpaceMouse X) to
+              insert into slot.  LEFT to advance.
+- REMOVE:     operator moves EE vertically (SpaceMouse Z / world-Z) to lift
+              energy unit out of slot.  LEFT to advance.
 - CONFIRM:    stability gate; LEFT to confirm.
 
 Usage:
@@ -29,7 +32,7 @@ import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
 
-from assembly_fsm import LinearInterpolator, StageCheckers
+from assembly_fsm import StageCheckers
 
 
 # ── States ──────────────────────────────────────────────────────────────────
@@ -37,8 +40,9 @@ from assembly_fsm import LinearInterpolator, StageCheckers
 class PickupState(Enum):
     IDLE      = auto()   # waiting for LEFT to start
     APPROACH  = auto()   # operator translates toward fixture; pitch auto-ramps
-    ARC_ALIGN = auto()   # SpaceMouse X drives arc along fixture circumference
-    LIFT_EE   = auto()   # auto: move 80mm along EE z-axis
+    ARC_ALIGN = auto()   # SpaceMouse Y drives arc along fixture circumference
+    GRAB      = auto()   # operator pushes EE-X forward to insert into slot
+    REMOVE    = auto()   # operator lifts along world-Z to remove energy unit
     CONFIRM   = auto()   # hold steady; LEFT to confirm after stability gate
     CONFIRMED = auto()   # confirmed, freeze everything
     ABORTED   = auto()   # user aborted
@@ -52,7 +56,8 @@ _TRANSLATION_ALLOWED = frozenset({
 _ACTIVE_STAGES = [
     PickupState.APPROACH,
     PickupState.ARC_ALIGN,
-    PickupState.LIFT_EE,
+    PickupState.GRAB,
+    PickupState.REMOVE,
     PickupState.CONFIRM,
 ]
 
@@ -67,8 +72,6 @@ class PickupConfig:
     arc_radius_mm: float                 # fixture radius (130mm)
     arc_center_dir_ee: np.ndarray        # EE-frame unit vec: EE → arc pivot
     arc_axis_ee: np.ndarray              # EE-frame rotation axis for arc
-    lift_distance_mm: float              # 80.0 — EE z-axis lift after arc align
-    lift_speed_m_s: float                # m/s for LIFT_EE
     stability_hold_s: float
     stability_threshold_m: float
 
@@ -84,8 +87,6 @@ def load_pickup_config(path: str) -> PickupConfig:
         arc_radius_mm=raw['arc_radius_mm'],
         arc_center_dir_ee=np.array(raw['arc_center_dir_ee'], dtype=float),
         arc_axis_ee=np.array(raw['arc_axis_ee'], dtype=float),
-        lift_distance_mm=raw.get('lift_distance_mm', 80.0),
-        lift_speed_m_s=raw.get('lift_speed_m_s', 0.05),
         stability_hold_s=raw['stability_hold_s'],
         stability_threshold_m=raw['stability_threshold_m'],
     )
@@ -120,9 +121,8 @@ class PickupFSM:
         self._arc_start_rot: Optional[Rotation] = None
         self._arc_angle: float = 0.0
 
-        # LIFT_EE state
-        self._lift_interp: Optional[LinearInterpolator] = None
-        self._lift_rot: Optional[Rotation] = None  # frozen EE orientation during lift
+        # GRAB / REMOVE state — orientation frozen from end of ARC_ALIGN
+        self._grab_rot: Optional[Rotation] = None
 
         # CONFIRM stability tracking
         self._stability_timer: float = 0.0
@@ -147,7 +147,7 @@ class PickupFSM:
     def position_override(self) -> Optional[np.ndarray]:
         if self._state == PickupState.ARC_ALIGN and self._arc_initialized:
             return self._current_pos
-        if self._state == PickupState.LIFT_EE and self._lift_interp is not None:
+        if self._state in (PickupState.GRAB, PickupState.REMOVE) and self._current_pos is not None:
             return self._current_pos
         return None
 
@@ -157,8 +157,8 @@ class PickupFSM:
             return self._current_rot
         if self._state == PickupState.ARC_ALIGN and self._arc_initialized:
             return self._current_rot
-        if self._state == PickupState.LIFT_EE and self._lift_rot is not None:
-            return self._lift_rot
+        if self._state in (PickupState.GRAB, PickupState.REMOVE) and self._grab_rot is not None:
+            return self._grab_rot
         return None
 
     @property
@@ -175,8 +175,9 @@ class PickupFSM:
         hints = {
             PickupState.IDLE:      'Press LEFT to begin pickup.',
             PickupState.APPROACH:  'Translate toward fixture. LEFT when aligned.',
-            PickupState.ARC_ALIGN: f'Arc along fixture (R={self._cfg.arc_radius_mm:.0f}mm) — push fwd/back (X). LEFT when ready.',
-            PickupState.LIFT_EE:   f'Auto-lifting {self._cfg.lift_distance_mm:.0f}mm along EE z...',
+            PickupState.ARC_ALIGN: f'Arc along fixture (R={self._cfg.arc_radius_mm:.0f}mm) — push left/right (Y). LEFT when ready.',
+            PickupState.GRAB:      'Push X forward to insert into slot. LEFT when grabbed.',
+            PickupState.REMOVE:    'Move Z up to remove energy unit. LEFT when clear.',
             PickupState.CONFIRM:   'Hold steady. Press LEFT to confirm.',
             PickupState.CONFIRMED: 'Confirmed! Press LEFT to reset.',
             PickupState.ABORTED:   'Aborted. Press LEFT to reset.',
@@ -208,9 +209,15 @@ class PickupFSM:
             self._arc_initialized = False
             self._arc_angle = 0.0
         elif self._state == PickupState.ARC_ALIGN:
-            # Auto-lift starts on next tick; orientation frozen from arc end
-            self._state = PickupState.LIFT_EE
-            self._lift_interp = None
+            # Freeze orientation at arc end; operator takes over with X/Z
+            self._grab_rot = self._current_rot
+            self._state = PickupState.GRAB
+        elif self._state == PickupState.GRAB:
+            self._state = PickupState.REMOVE
+        elif self._state == PickupState.REMOVE:
+            self._state = PickupState.CONFIRM
+            self._stability_timer = 0.0
+            self._recent_positions.clear()
 
     def confirm(self) -> None:
         if self.can_confirm:
@@ -221,8 +228,7 @@ class PickupFSM:
             self._state = PickupState.IDLE
             self._arc_initialized = False
             self._arc_angle = 0.0
-            self._lift_interp = None
-            self._lift_rot = None
+            self._grab_rot = None
             self._stability_timer = 0.0
             self._recent_positions.clear()
 
@@ -231,8 +237,7 @@ class PickupFSM:
         self._state = PickupState.IDLE
         self._arc_initialized = False
         self._arc_angle = 0.0
-        self._lift_interp = None
-        self._lift_rot = None
+        self._grab_rot = None
         self._stability_timer = 0.0
         self._recent_positions.clear()
         self._current_pos = None
@@ -247,8 +252,10 @@ class PickupFSM:
             self._tick_approach(dt)
         elif self._state == PickupState.ARC_ALIGN:
             self._tick_arc_align(ee_pos, ee_rot, sm_lin_delta)
-        elif self._state == PickupState.LIFT_EE:
-            self._tick_lift_ee(ee_pos, ee_rot, dt)
+        elif self._state == PickupState.GRAB:
+            self._tick_grab(sm_lin_delta)
+        elif self._state == PickupState.REMOVE:
+            self._tick_remove(sm_lin_delta)
         elif self._state == PickupState.CONFIRM:
             self._recent_positions.append(ee_pos.copy())
             if (StageCheckers.check_stability(
@@ -274,13 +281,13 @@ class PickupFSM:
 
     def _tick_arc_align(self, ee_pos: np.ndarray, ee_rot: Rotation,
                         sm_lin_delta: np.ndarray) -> None:
-        """Manual circumferential arc — SpaceMouse X-axis drives arc angle.
+        """Manual circumferential arc — SpaceMouse Y-axis drives arc angle.
 
         On first tick: initializes pivot and axis in world frame from EE frame
         config (arc_center_dir_ee, arc_axis_ee) so any approach yaw is handled.
 
-        Arc control: sm_lin_delta[0] (world X = SpaceMouse push forward/back)
-        is used directly as arc travel in meters.  Positive = forward = increasing
+        Arc control: sm_lin_delta[1] (world Y = SpaceMouse push left/right)
+        is used directly as arc travel in meters.  Positive = right = increasing
         arc angle.
         """
         if not self._arc_initialized:
@@ -299,30 +306,34 @@ class PickupFSM:
 
         radius = self._cfg.arc_radius_mm / 1000.0
 
-        # SpaceMouse X (world X = push forward) directly drives arc travel
-        d_arc = float(sm_lin_delta[0])
+        # SpaceMouse Y (world Y = push left/right) directly drives arc travel
+        d_arc = float(sm_lin_delta[1])
         self._arc_angle += d_arc / radius
 
         arc_rot = Rotation.from_rotvec(self._arc_axis_world * self._arc_angle)
         self._current_pos = self._arc_pivot + arc_rot.apply(self._arc_offset_0)
         self._current_rot = arc_rot * self._arc_start_rot
 
-    def _tick_lift_ee(self, ee_pos: np.ndarray, ee_rot: Rotation,
-                      dt: float) -> None:
-        """Auto-lift along EE z-axis; auto-advances to CONFIRM when done."""
-        if self._lift_interp is None:
-            # First tick: compute target along current EE z-axis
-            ee_z_world = ee_rot.apply(np.array([0.0, 0.0, 1.0]))
-            target = ee_pos + ee_z_world * (self._cfg.lift_distance_mm / 1000.0)
-            self._lift_interp = LinearInterpolator(ee_pos, target, self._cfg.lift_speed_m_s)
-            self._lift_rot = ee_rot          # freeze orientation during lift
-            self._current_pos = ee_pos.copy()
-            return
+    def _tick_grab(self, sm_lin_delta: np.ndarray) -> None:
+        """Manual EE-X translation — SpaceMouse X drives forward into slot.
 
-        pos, done = self._lift_interp.tick(dt)
-        self._current_pos = pos
-        if done:
-            self._lift_interp = None
-            self._state = PickupState.CONFIRM
-            self._stability_timer = 0.0
-            self._recent_positions.clear()
+        Projects sm_lin_delta onto the frozen EE-X world direction so only the
+        component pointing 'forward' (along the arm's approach axis) is applied.
+        """
+        if self._current_pos is None or self._grab_rot is None:
+            return
+        ee_x_world = self._grab_rot.apply(np.array([1.0, 0.0, 0.0]))
+        d = float(np.dot(sm_lin_delta, ee_x_world)) * ee_x_world
+        self._current_pos = self._current_pos + d
+
+    def _tick_remove(self, sm_lin_delta: np.ndarray) -> None:
+        """Manual EE-Z translation — SpaceMouse Z lifts energy unit out of slot.
+
+        Projects sm_lin_delta onto the frozen EE-Z world direction so the motion
+        follows the arm's own Z axis regardless of its orientation.
+        """
+        if self._current_pos is None or self._grab_rot is None:
+            return
+        ee_z_world = self._grab_rot.apply(np.array([0.0, 0.0, 1.0]))
+        d = float(np.dot(sm_lin_delta, ee_z_world)) * ee_z_world
+        self._current_pos = self._current_pos + d

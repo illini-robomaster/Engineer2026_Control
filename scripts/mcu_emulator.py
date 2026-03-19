@@ -50,7 +50,7 @@ NUM_JOINTS = 6
 #   J4 (gear 1:1, sign -1):  ±180° motor
 #   J5 (gear 1:1, sign -1):  ±150° motor
 #   J6 (gear 1:1, sign +1):  ±180° motor
-JOINT_MIN_DEG = [-360.0, -90.0, -68.75, -180.0, -150.0, -180.0]
+JOINT_MIN_DEG = [-360.0, -90.0, -90, -180.0, -150.0, -180.0]
 JOINT_MAX_DEG = [ 360.0,  90.0, 229.18,  180.0,  150.0,  180.0]
 
 # ── Per-joint velocity limits (deg/s, converted from ARM_VEL_LIM rad/s) ──

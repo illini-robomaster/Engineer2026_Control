@@ -20,7 +20,7 @@ joint_limits:
     max_acceleration: 5.0
   Joint3:
     has_position_limits: true
-    min_position: -1.20      # -68.75 deg
+    min_position: -1.40      # -80.2 deg
     max_position:  4.0       # +229.18 deg
     has_velocity_limits: false
     max_velocity: 3.0
