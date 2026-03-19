@@ -740,6 +740,20 @@ class IkTeleopNode(Node):
             # Read current joint state (after homing) to compute post-home FK
             with self._lock:
                 js = dict(self._joint_pos)
+            # Reset IK control-loop state so the first solve after homing seeds
+            # from the actual post-home hardware joints, not the stale pre-home
+            # last_solved.  Without this, pick_best can select the old pre-home
+            # configuration (if it happens to be close to q_preferred) and the
+            # velocity limiter then smoothly moves the arm AWAY from home.
+            if js and len(js) == len(self._joint_names):
+                post_home_q = [js.get(n, 0.0) for n in self._joint_names]
+                with self._lock:
+                    self._last_solved_joints = post_home_q
+            # Also flush the EMA smoother — its buffered values are from before
+            # homing and would cause lag or drift on the first post-home target.
+            self._smoothed_pos  = None
+            self._smoothed_quat = None
+            self._prev_raw_pos  = None
             with self._fk_feedback_lock:
                 fb = dict(self._fk_feedback)
                 fb.pop('homing', None)
