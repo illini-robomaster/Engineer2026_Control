@@ -61,6 +61,13 @@ from moveit_msgs.msg import (
     MotionPlanRequest,
 )
 
+from .ik_selection import (
+    IkCandidate,
+    build_candidate,
+    choose_best_candidate,
+    seed_kind_from_label,
+)
+
 
 # ── Pure-numpy FK + geometric Jacobian ───────────────────────────────────────
 
@@ -114,6 +121,42 @@ def _mat3_to_rpy(R: np.ndarray) -> tuple:
         roll = float(np.arctan2(-R[1, 2], R[1, 1]))
         yaw  = 0.0
     return roll, pitch, yaw
+
+
+def _mat3_to_quat(R: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix -> quaternion [qx, qy, qz, qw]."""
+    trace = float(np.trace(R))
+    if trace > 0.0:
+        s = 2.0 * np.sqrt(trace + 1.0)
+        qw = 0.25 * s
+        qx = (R[2, 1] - R[1, 2]) / s
+        qy = (R[0, 2] - R[2, 0]) / s
+        qz = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(max(1.0 + R[0, 0] - R[1, 1] - R[2, 2], 1e-12))
+        qw = (R[2, 1] - R[1, 2]) / s
+        qx = 0.25 * s
+        qy = (R[0, 1] + R[1, 0]) / s
+        qz = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(max(1.0 + R[1, 1] - R[0, 0] - R[2, 2], 1e-12))
+        qw = (R[0, 2] - R[2, 0]) / s
+        qx = (R[0, 1] + R[1, 0]) / s
+        qy = 0.25 * s
+        qz = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(max(1.0 + R[2, 2] - R[0, 0] - R[1, 1], 1e-12))
+        qw = (R[1, 0] - R[0, 1]) / s
+        qx = (R[0, 2] + R[2, 0]) / s
+        qy = (R[1, 2] + R[2, 1]) / s
+        qz = 0.25 * s
+    quat = np.array([qx, qy, qz, qw], dtype=float)
+    norm = float(np.linalg.norm(quat))
+    if norm > 1e-9:
+        quat /= norm
+    if quat[3] < 0.0:
+        quat *= -1.0
+    return quat
 
 
 def _ik_diag_str(chain_data, last_solved, target_pos, target_quat) -> str:
@@ -225,6 +268,217 @@ def _joint_limits(chain_data: list) -> tuple:
     lowers = np.array([s['lower'] for s in chain_data if s['type'] in ('revolute', 'continuous')])
     uppers = np.array([s['upper'] for s in chain_data if s['type'] in ('revolute', 'continuous')])
     return lowers, uppers
+
+
+def _empty_6d_trace() -> dict:
+    return {
+        'ik6d_attempted_total': 0,
+        'ik6d_attempted_deterministic': 0,
+        'ik6d_attempted_random': 0,
+        'ik6d_time_budget_hit': 0,
+        'ik6d_best_failed_seed': '',
+        'ik6d_best_failed_seed_kind': '',
+        'ik6d_best_failed_reason': '',
+        'ik6d_best_failed_class': '',
+        'ik6d_best_failed_pos_err_mm': None,
+        'ik6d_best_failed_ori_err_deg': None,
+        'ik6d_best_failed_sigma_min': None,
+        'ik6d_best_failed_singular': 0,
+        'ik6d_best_failed_iters': None,
+    }
+
+
+def _classify_6d_failure(final_pos_err_m: float, final_ori_err_rad: float) -> str:
+    if final_pos_err_m < 2e-3 and final_ori_err_rad >= 0.052:
+        return 'orientation_only'
+    if final_pos_err_m < 1e-2 and final_ori_err_rad >= 0.052:
+        return 'near_position'
+    if final_ori_err_rad < 0.052 and final_pos_err_m >= 2e-3:
+        return 'position_only'
+    if final_ori_err_rad < 0.12 and final_pos_err_m >= 2e-3:
+        return 'near_orientation'
+    return 'mixed'
+
+
+def _failed_6d_sort_key(diag: dict) -> tuple[float, float, float, int, int]:
+    final_6d_err = diag.get('final_6d_err')
+    final_ori_err = diag.get('final_ori_err_rad')
+    final_pos_err = diag.get('final_pos_err_m')
+    return (
+        float(final_6d_err) if final_6d_err is not None and np.isfinite(final_6d_err) else float('inf'),
+        float(final_ori_err) if final_ori_err is not None and np.isfinite(final_ori_err) else float('inf'),
+        float(final_pos_err) if final_pos_err is not None and np.isfinite(final_pos_err) else float('inf'),
+        0 if diag.get('seed_kind') == 'deterministic' else 1,
+        int(diag.get('seed_index', 10**9)),
+    )
+
+
+def _attempt_summary(
+    attempted_total: int,
+    attempted_deterministic: int,
+    attempted_random: int,
+    time_budget_hit: bool,
+    best_failed_6d: Optional[dict],
+) -> dict:
+    summary = {
+        'attempted_total': attempted_total,
+        'attempted_deterministic': attempted_deterministic,
+        'attempted_random': attempted_random,
+        'time_budget_hit': bool(time_budget_hit),
+    }
+    if best_failed_6d is not None:
+        summary.update({
+            'best_failed_seed': best_failed_6d.get('label', ''),
+            'best_failed_seed_kind': best_failed_6d.get('seed_kind', ''),
+            'best_failed_reason': best_failed_6d.get('reason', ''),
+            'best_failed_class': best_failed_6d.get('failure_class', ''),
+            'best_failed_pos_err_m': best_failed_6d.get('final_pos_err_m'),
+            'best_failed_ori_err_rad': best_failed_6d.get('final_ori_err_rad'),
+            'best_failed_sigma_min': best_failed_6d.get('min_sigma_min'),
+            'best_failed_singular': int(best_failed_6d.get('singular', 0) or 0),
+            'best_failed_iters': best_failed_6d.get('iters'),
+        })
+    return summary
+
+
+def _copy_6d_trace_from_meta(meta: Optional[dict]) -> dict:
+    trace = _empty_6d_trace()
+    if not meta:
+        return trace
+
+    pos_err_m = meta.get('best_failed_pos_err_m')
+    ori_err_rad = meta.get('best_failed_ori_err_rad')
+    sigma_min = meta.get('best_failed_sigma_min')
+    trace.update({
+        'ik6d_attempted_total': int(meta.get('attempted_total', 0) or 0),
+        'ik6d_attempted_deterministic': int(meta.get('attempted_deterministic', 0) or 0),
+        'ik6d_attempted_random': int(meta.get('attempted_random', 0) or 0),
+        'ik6d_time_budget_hit': 1 if meta.get('time_budget_hit') else 0,
+        'ik6d_best_failed_seed': str(meta.get('best_failed_seed', '') or ''),
+        'ik6d_best_failed_seed_kind': str(meta.get('best_failed_seed_kind', '') or ''),
+        'ik6d_best_failed_reason': str(meta.get('best_failed_reason', '') or ''),
+        'ik6d_best_failed_class': str(meta.get('best_failed_class', '') or ''),
+        'ik6d_best_failed_pos_err_mm': (
+            float(pos_err_m) * 1000.0
+            if pos_err_m is not None and np.isfinite(pos_err_m) else None
+        ),
+        'ik6d_best_failed_ori_err_deg': (
+            float(ori_err_rad) * 180.0 / np.pi
+            if ori_err_rad is not None and np.isfinite(ori_err_rad) else None
+        ),
+        'ik6d_best_failed_sigma_min': (
+            float(sigma_min) if sigma_min is not None and np.isfinite(sigma_min) else None
+        ),
+        'ik6d_best_failed_singular': int(meta.get('best_failed_singular', 0) or 0),
+        'ik6d_best_failed_iters': meta.get('best_failed_iters'),
+    })
+    return trace
+
+
+def _merge_6d_trace(meta: Optional[dict], trace: Optional[dict]) -> dict:
+    merged = dict(meta or {})
+    if trace:
+        merged.update(trace)
+    return merged
+
+
+def _format_6d_trace(trace: Optional[dict]) -> str:
+    if not trace:
+        return ''
+
+    attempted_total = int(trace.get('ik6d_attempted_total', 0) or 0)
+    if attempted_total <= 0:
+        return ''
+
+    attempted_det = int(trace.get('ik6d_attempted_deterministic', 0) or 0)
+    attempted_rand = int(trace.get('ik6d_attempted_random', 0) or 0)
+    parts = [f'6d_attempts={attempted_total}(det={attempted_det} rand={attempted_rand})']
+
+    if trace.get('ik6d_time_budget_hit'):
+        parts.append('budget_hit=1')
+
+    best_seed = str(trace.get('ik6d_best_failed_seed', '') or '')
+    if best_seed:
+        best_class = str(trace.get('ik6d_best_failed_class', '') or '')
+        parts.append(f'6d_best={best_seed}' + (f'/{best_class}' if best_class else ''))
+        reason = str(trace.get('ik6d_best_failed_reason', '') or '')
+        if reason:
+            parts.append(f'reason={reason}')
+        pos_err_mm = trace.get('ik6d_best_failed_pos_err_mm')
+        if pos_err_mm is not None and np.isfinite(pos_err_mm):
+            parts.append(f'pos={float(pos_err_mm):.1f}mm')
+        ori_err_deg = trace.get('ik6d_best_failed_ori_err_deg')
+        if ori_err_deg is not None and np.isfinite(ori_err_deg):
+            parts.append(f'ori={float(ori_err_deg):.1f}deg')
+        sigma_min = trace.get('ik6d_best_failed_sigma_min')
+        if sigma_min is not None and np.isfinite(sigma_min):
+            parts.append(f'sigma={float(sigma_min):.4f}')
+        if int(trace.get('ik6d_best_failed_singular', 0) or 0):
+            parts.append('sing=1')
+
+    return '  '.join(parts)
+
+
+def _empty_winner_meta() -> dict:
+    return {
+        'seed': '',
+        'seed_kind': '',
+        'winner_pool': '',
+        'attempted_total': 0,
+        'attempted_deterministic': 0,
+        'attempted_random': 0,
+        'time_budget_hit': False,
+        'valid_total': 0,
+        'valid_deterministic': 0,
+        'valid_random': 0,
+        'valid_under_jump': 0,
+        'continuity_cost': None,
+        'joint_state_cost': None,
+        'posture_cost': None,
+        'max_jump': None,
+        'best_failed_seed': '',
+        'best_failed_seed_kind': '',
+        'best_failed_reason': '',
+        'best_failed_class': '',
+        'best_failed_pos_err_m': None,
+        'best_failed_ori_err_rad': None,
+        'best_failed_sigma_min': None,
+        'best_failed_singular': 0,
+        'best_failed_iters': None,
+        **_empty_6d_trace(),
+    }
+
+
+def _winner_meta(candidate: Optional[IkCandidate], summary: Optional[dict] = None) -> dict:
+    meta = _empty_winner_meta()
+    if summary:
+        meta.update(summary)
+    if candidate is not None:
+        meta.update({
+            'seed': candidate.label,
+            'seed_kind': candidate.seed_kind,
+            'continuity_cost': candidate.continuity_cost,
+            'joint_state_cost': candidate.joint_state_cost,
+            'posture_cost': candidate.posture_cost,
+            'max_jump': candidate.max_jump,
+        })
+    return meta
+
+
+def _fmt_metric(value: Optional[float], precision: int = 3) -> str:
+    if value is None or not np.isfinite(value):
+        return 'na'
+    return f'{float(value):.{precision}f}'
+
+
+def _json_metric(value):
+    if value is None:
+        return ''
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return '' if not np.isfinite(value) else float(value)
+    return value
 
 
 def _fk_and_jac(chain_data: list, q: np.ndarray) -> tuple:
@@ -416,7 +670,18 @@ class IkTeleopNode(Node):
         self._diag_solve_ms_sum    = 0.0
         self._diag_solve_ms_max    = 0.0
         self._diag_last_seed       = ''
+        self._diag_last_seed_kind  = ''
+        self._diag_last_pool       = ''
+        self._diag_last_continuity: Optional[float] = None
+        self._diag_last_joint_state: Optional[float] = None
+        self._diag_last_posture: Optional[float] = None
+        self._diag_last_valid_total = 0
+        self._diag_last_valid_det   = 0
+        self._diag_last_valid_rand  = 0
+        self._diag_last_valid_under_jump = 0
+        self._diag_last_ik6d_trace = ''
         self._ik_fail_log_time: float = 0.0
+        self._joint_state_warned = False
 
         # ── Per-tick debug CSV log ──────────────────────────────────────────
         debug_log_path = p('debug_log', '')
@@ -438,7 +703,33 @@ class IkTeleopNode(Node):
                 # IK outcome
                 'result',                          # 6D / POS_ONLY / SNAP / FAIL / JUMP_REJECT / JUMP_REJECT/pos_only
                 'seed',                            # winning seed label
-                'max_jump_rad',                    # largest joint delta from last_solved
+                'seed_kind',                       # deterministic / random / snap
+                'winner_pool',                     # under_jump / all / snap / first_valid
+                'valid_total',
+                'attempted_total',
+                'attempted_deterministic',
+                'attempted_random',
+                'time_budget_hit',
+                'valid_deterministic',
+                'valid_random',
+                'valid_under_jump',
+                'ik6d_attempted_total',
+                'ik6d_attempted_deterministic',
+                'ik6d_attempted_random',
+                'ik6d_time_budget_hit',
+                'ik6d_best_failed_seed',
+                'ik6d_best_failed_seed_kind',
+                'ik6d_best_failed_reason',
+                'ik6d_best_failed_class',
+                'ik6d_best_failed_pos_err_mm',
+                'ik6d_best_failed_ori_err_deg',
+                'ik6d_best_failed_sigma_min',
+                'ik6d_best_failed_singular',
+                'ik6d_best_failed_iters',
+                'continuity_cost',
+                'joint_state_cost',
+                'posture_cost',
+                'max_jump_rad',                    # largest joint delta from last_solved before vel limiting
                 'vel_clamped',                     # 1 if velocity limiter fired
                 # Solved joints
                 'j1', 'j2', 'j3', 'j4', 'j5', 'j6',
@@ -760,14 +1051,12 @@ class IkTeleopNode(Node):
                 # Provide post-home FK so Mac can resync ee_pos immediately
                 if self._chain_data and js:
                     try:
-                        q = np.array([js.get(n, 0.0) for n in self._joint_names])
-                        p_home, _, _ = _fk_and_jac(self._chain_data, q)
-                        fb.update({
-                            'fk_x': float(p_home[0]),
-                            'fk_y': float(p_home[1]),
-                            'fk_z': float(p_home[2]),
-                            'ik_ok': True,
-                        })
+                        post_home_q = [js.get(n, 0.0) for n in self._joint_names]
+                        fb.update(self._feedback_from_solution(
+                            post_home_q,
+                            ik_ok=True,
+                            result_type='HOME',
+                        ))
                     except Exception:
                         pass
                 self._fk_feedback = fb
@@ -858,6 +1147,7 @@ class IkTeleopNode(Node):
         seed_label: str = '',
         log_fail: bool = False,
         max_iters: int = 500,
+        diag_out: Optional[dict] = None,
     ) -> Optional[list]:
         """6D pose DLS IK.  Minimises position + orientation error simultaneously.
 
@@ -884,6 +1174,7 @@ class IkTeleopNode(Node):
         init_ori_err: Optional[float] = None
         iters_used: int = 0
         stop_reason: str = 'max_iters'
+        min_sigma_min: Optional[float] = None
 
         lam = 1e-3
         prev_err = float('inf')
@@ -928,6 +1219,8 @@ class IkTeleopNode(Node):
             # (J5 ≈ 0 / EE z ≈ world z wrist singularity), enforce a minimum lambda
             # proportional to singularity depth to prevent numerically unstable dq.
             sigma_min = float(np.linalg.svd(J_w, compute_uv=False)[-1])
+            if min_sigma_min is None or sigma_min < min_sigma_min:
+                min_sigma_min = sigma_min
             if sigma_min < self._sing_threshold:
                 sing_lam = self._sing_lam_max * (1.0 - sigma_min / self._sing_threshold) ** 2
                 lam = max(lam, sing_lam)
@@ -955,18 +1248,39 @@ class IkTeleopNode(Node):
             if final_pos < 2e-3 and final_ori < 0.052:   # 2 mm + ~3.0 deg
                 return list(q)
 
-        if log_fail:
+        if log_fail or diag_out is not None:
             p_f, R_f, _ = _fk_and_jac(self._chain_data, q)
             R_ef = R_tgt @ R_f.T
             e_rf = 0.5 * np.array([R_ef[2,1]-R_ef[1,2], R_ef[0,2]-R_ef[2,0], R_ef[1,0]-R_ef[0,1]])
+            final_pos = float(np.linalg.norm(target_pos - p_f))
+            final_ori = float(np.linalg.norm(e_rf))
+            final_6d_err = float(np.linalg.norm(np.concatenate([target_pos - p_f, w * e_rf])))
+            singular = int(min_sigma_min is not None and min_sigma_min < self._sing_threshold)
+            if diag_out is not None:
+                diag_out.clear()
+                diag_out.update({
+                    'init_pos_err_m': init_pos_err,
+                    'init_ori_err_rad': init_ori_err,
+                    'final_pos_err_m': final_pos,
+                    'final_ori_err_rad': final_ori,
+                    'final_6d_err': final_6d_err,
+                    'reason': stop_reason,
+                    'failure_class': _classify_6d_failure(final_pos, final_ori),
+                    'iters': iters_used,
+                    'min_sigma_min': min_sigma_min,
+                    'singular': singular,
+                })
+        if log_fail:
             label = f'[{seed_label}]' if seed_label else ''
             self.get_logger().warn(
                 f'IK6D fail {label}  '
                 f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})  '
                 f'init_pos_err={init_pos_err:.4f}m  init_ori_err={init_ori_err:.4f}rad  '
-                f'final_pos_err={np.linalg.norm(target_pos-p_f):.4f}m  '
-                f'final_ori_err={np.linalg.norm(e_rf):.4f}rad  '
-                f'iters={iters_used}  reason={stop_reason}')
+                f'final_pos_err={final_pos:.4f}m  '
+                f'final_ori_err={final_ori:.4f}rad  '
+                f'iters={iters_used}  reason={stop_reason}  '
+                f'class={_classify_6d_failure(final_pos, final_ori)}  '
+                f'sigma_min={_fmt_metric(min_sigma_min, precision=4)}')
         return None
 
     # ── IK helper: try a list of seeds ───────────────────────────────────────
@@ -976,46 +1290,98 @@ class IkTeleopNode(Node):
         target_pos: np.ndarray,
         target_quat: Optional[np.ndarray],
         seeds: list,
+        last_solved: Optional[list] = None,
+        joint_state: Optional[list] = None,
         log_fail: bool = False,
         max_iters: int = 500,
         time_budget: float = 0.0,
         pick_best: bool = False,
-    ) -> tuple[Optional[list], str]:
-        """Try each (label, seed) pair; return (solution, winning_seed_label).
+    ) -> tuple[Optional[list], dict]:
+        """Try each (label, seed) pair; return (solution, winner metadata).
 
         time_budget: if > 0, stop trying seeds after this many seconds elapsed.
         pick_best:   if True, try ALL seeds within the time budget and return
-                     the solution whose joints are closest to q_preferred
-                     (L2 distance).  This prevents the solver from settling on
-                     a J4=±180° solution when a J4≈0° solution also exists.
+                     the solution that best preserves continuity with the
+                     current arm state. q_preferred is only a weak tie-breaker.
                      If False (default), return the first valid solution found.
         """
         t0 = time.monotonic() if time_budget > 0.0 else 0.0
 
-        best_sol:   Optional[list] = None
-        best_label: str            = ''
-        best_dist:  float          = float('inf')
+        candidates: list[IkCandidate] = []
+        attempted_total = 0
+        attempted_deterministic = 0
+        attempted_random = 0
+        time_budget_hit = False
+        best_failed_6d: Optional[dict] = None
 
-        for label, s in seeds:
+        for seed_index, (label, s) in enumerate(seeds):
             if time_budget > 0.0 and (time.monotonic() - t0) > time_budget:
+                time_budget_hit = True
                 break
+            seed_kind = seed_kind_from_label(label)
+            attempted_total += 1
+            if seed_kind == 'random':
+                attempted_random += 1
+            else:
+                attempted_deterministic += 1
+            seed_diag = {} if (self._ctrl_ori and target_quat is not None) else None
             if self._ctrl_ori and target_quat is not None:
                 result = self._solve_ik_6d(
-                    target_pos, target_quat, s, label, log_fail, max_iters=max_iters)
+                    target_pos, target_quat, s, label, log_fail,
+                    max_iters=max_iters, diag_out=seed_diag)
             else:
                 result = self._solve_ik_pos_only(
                     target_pos, s, label, log_fail, max_iters=max_iters)
             if result is not None:
+                candidate = build_candidate(
+                    label=label,
+                    joints=result,
+                    last_solved=last_solved,
+                    joint_state=joint_state,
+                    q_preferred=self._q_preferred[:len(result)],
+                    seed_index=seed_index,
+                    max_joint_jump=self._max_joint_jump,
+                )
+                candidates.append(candidate)
                 if not pick_best:
-                    return result, label
-                dist = float(np.linalg.norm(
-                    np.array(result) - self._q_preferred[:len(result)]))
-                if dist < best_dist:
-                    best_dist  = dist
-                    best_sol   = result
-                    best_label = label
+                    summary = _attempt_summary(
+                        attempted_total,
+                        attempted_deterministic,
+                        attempted_random,
+                        time_budget_hit,
+                        best_failed_6d,
+                    )
+                    summary.update({
+                        'valid_total': 1,
+                        'valid_deterministic': 1 if candidate.seed_kind == 'deterministic' else 0,
+                        'valid_random': 1 if candidate.seed_kind == 'random' else 0,
+                        'valid_under_jump': 1 if candidate.within_jump_limit else 0,
+                        'winner_pool': 'first_valid',
+                    })
+                    return list(candidate.joints), _winner_meta(
+                        candidate,
+                        summary,
+                    )
+            elif seed_diag is not None:
+                seed_diag.update({
+                    'label': label,
+                    'seed_kind': seed_kind,
+                    'seed_index': seed_index,
+                })
+                if best_failed_6d is None or _failed_6d_sort_key(seed_diag) < _failed_6d_sort_key(best_failed_6d):
+                    best_failed_6d = dict(seed_diag)
 
-        return best_sol, best_label
+        winner, summary = choose_best_candidate(candidates)
+        attempt_meta = _attempt_summary(
+            attempted_total,
+            attempted_deterministic,
+            attempted_random,
+            time_budget_hit,
+            best_failed_6d,
+        )
+        if winner is None:
+            return None, _winner_meta(None, attempt_meta)
+        return list(winner.joints), _winner_meta(winner, {**summary, **attempt_meta})
 
     # ── Snap-to-reachable fallback ────────────────────────────────────────────
 
@@ -1023,7 +1389,6 @@ class IkTeleopNode(Node):
         self,
         target_pos: np.ndarray,
         target_quat: Optional[np.ndarray],
-        det_seeds: list,
         time_budget: float = 0.005,
     ) -> Optional[list]:
         """Binary-search along ray from current EE to target; return IK solution
@@ -1054,8 +1419,12 @@ class IkTeleopNode(Node):
                 break
             mid = (lo + hi) / 2.0
             cand = p_cur + mid * direction
-            sol, _ = self._try_ik(cand, target_quat, snap_seeds,
-                                  log_fail=False, max_iters=100)
+            sol, _ = self._try_ik(
+                cand, target_quat, snap_seeds,
+                last_solved=self._last_solved_joints,
+                joint_state=self._last_solved_joints,
+                log_fail=False, max_iters=100,
+            )
             if sol is not None:
                 best = sol
                 lo = mid   # can go further
@@ -1068,12 +1437,13 @@ class IkTeleopNode(Node):
     def _log_csv_row(
         self, t_tick: float, solve_ms: float, age: float,
         tgt_pos, raw_quat, off_quat,
-        result_type: str, seed: str,
-        max_jump, vel_clamped: bool,
+        result_type: str, winner_meta: dict,
+        vel_clamped: bool,
         result_joints, js_list,
     ):
         if self._csv_writer is None:
             return
+        winner_meta = winner_meta or _empty_winner_meta()
         fk_x = fk_y = fk_z = fk_err = ''
         ori_err = ori_rx = ori_ry = ori_rz = ''
         if result_joints is not None and tgt_pos is not None:
@@ -1094,17 +1464,110 @@ class IkTeleopNode(Node):
             return [f'{v:.5f}' for v in j] if j is not None else [''] * 6
         def _pf(p):
             return [f'{p[i]:.5f}' for i in range(3)] if p is not None else [''] * 3
+        def _maybe(v):
+            if v is None or (isinstance(v, (float, np.floating)) and not np.isfinite(v)):
+                return ''
+            return f'{float(v):.4f}' if isinstance(v, (float, np.floating, int)) else v
 
         self._csv_writer.writerow([
             f'{t_tick:.4f}', f'{solve_ms:.2f}', f'{age*1000:.1f}',
             *_pf(tgt_pos), *_qf(raw_quat), *_qf(off_quat),
-            result_type, seed,
-            f'{max_jump:.4f}' if max_jump is not None else '',
+            result_type, winner_meta.get('seed', ''),
+            winner_meta.get('seed_kind', ''),
+            winner_meta.get('winner_pool', ''),
+            winner_meta.get('valid_total', 0),
+            winner_meta.get('attempted_total', 0),
+            winner_meta.get('attempted_deterministic', 0),
+            winner_meta.get('attempted_random', 0),
+            '1' if winner_meta.get('time_budget_hit') else '0',
+            winner_meta.get('valid_deterministic', 0),
+            winner_meta.get('valid_random', 0),
+            winner_meta.get('valid_under_jump', 0),
+            winner_meta.get('ik6d_attempted_total', 0),
+            winner_meta.get('ik6d_attempted_deterministic', 0),
+            winner_meta.get('ik6d_attempted_random', 0),
+            winner_meta.get('ik6d_time_budget_hit', 0),
+            winner_meta.get('ik6d_best_failed_seed', ''),
+            winner_meta.get('ik6d_best_failed_seed_kind', ''),
+            winner_meta.get('ik6d_best_failed_reason', ''),
+            winner_meta.get('ik6d_best_failed_class', ''),
+            _maybe(winner_meta.get('ik6d_best_failed_pos_err_mm')),
+            _maybe(winner_meta.get('ik6d_best_failed_ori_err_deg')),
+            _maybe(winner_meta.get('ik6d_best_failed_sigma_min')),
+            winner_meta.get('ik6d_best_failed_singular', 0),
+            '' if winner_meta.get('ik6d_best_failed_iters') is None else winner_meta.get('ik6d_best_failed_iters'),
+            _maybe(winner_meta.get('continuity_cost')),
+            _maybe(winner_meta.get('joint_state_cost')),
+            _maybe(winner_meta.get('posture_cost')),
+            _maybe(winner_meta.get('max_jump')),
             '1' if vel_clamped else '0',
             *_jf(result_joints), *_jf(js_list),
             fk_x, fk_y, fk_z, fk_err,
             ori_err, ori_rx, ori_ry, ori_rz,
         ])
+
+    def _record_diag_meta(self, winning_seed: str, winner_meta: dict) -> None:
+        winner_meta = winner_meta or _empty_winner_meta()
+        self._diag_last_seed = winning_seed
+        self._diag_last_seed_kind = str(winner_meta.get('seed_kind', ''))
+        self._diag_last_pool = str(winner_meta.get('winner_pool', ''))
+        self._diag_last_continuity = winner_meta.get('continuity_cost')
+        self._diag_last_joint_state = winner_meta.get('joint_state_cost')
+        self._diag_last_posture = winner_meta.get('posture_cost')
+        self._diag_last_valid_total = int(winner_meta.get('valid_total', 0) or 0)
+        self._diag_last_valid_det = int(winner_meta.get('valid_deterministic', 0) or 0)
+        self._diag_last_valid_rand = int(winner_meta.get('valid_random', 0) or 0)
+        self._diag_last_valid_under_jump = int(winner_meta.get('valid_under_jump', 0) or 0)
+        self._diag_last_ik6d_trace = _format_6d_trace(winner_meta)
+
+    def _feedback_from_solution(
+        self,
+        joints: Optional[list],
+        *,
+        ik_ok: bool,
+        result_type: str,
+        winner_meta: Optional[dict] = None,
+        fail_cause: str = '',
+    ) -> dict:
+        meta = winner_meta or _empty_winner_meta()
+        fb = {
+            'ik_ok': bool(ik_ok),
+            'ik_result': str(result_type),
+            'ik_seed': str(meta.get('seed', '') or ''),
+            'ik_seed_kind': str(meta.get('seed_kind', '') or ''),
+            'ik_pool': str(meta.get('winner_pool', '') or ''),
+            'ik_fail_cause': str(fail_cause or ''),
+            'ik_continuity_cost': _json_metric(meta.get('continuity_cost')),
+            'ik_joint_state_cost': _json_metric(meta.get('joint_state_cost')),
+            'ik_posture_cost': _json_metric(meta.get('posture_cost')),
+            'ik_max_jump_rad': _json_metric(meta.get('max_jump')),
+            'ik6d_time_budget_hit': int(meta.get('ik6d_time_budget_hit', 0) or 0),
+            'ik6d_best_failed_seed': str(meta.get('ik6d_best_failed_seed', '') or ''),
+            'ik6d_best_failed_seed_kind': str(meta.get('ik6d_best_failed_seed_kind', '') or ''),
+            'ik6d_best_failed_reason': str(meta.get('ik6d_best_failed_reason', '') or ''),
+            'ik6d_best_failed_class': str(meta.get('ik6d_best_failed_class', '') or ''),
+            'ik6d_best_failed_pos_err_mm': _json_metric(meta.get('ik6d_best_failed_pos_err_mm')),
+            'ik6d_best_failed_ori_err_deg': _json_metric(meta.get('ik6d_best_failed_ori_err_deg')),
+            'ik6d_best_failed_sigma_min': _json_metric(meta.get('ik6d_best_failed_sigma_min')),
+            'ik6d_best_failed_singular': int(meta.get('ik6d_best_failed_singular', 0) or 0),
+        }
+        if joints is None:
+            return fb
+
+        q = np.array(joints, dtype=float)
+        p_sol, R_sol, _ = _fk_and_jac(self._chain_data, q)
+        q_sol = _mat3_to_quat(R_sol)
+        fb.update({
+            'fk_x': float(p_sol[0]),
+            'fk_y': float(p_sol[1]),
+            'fk_z': float(p_sol[2]),
+            'fk_qx': float(q_sol[0]),
+            'fk_qy': float(q_sol[1]),
+            'fk_qz': float(q_sol[2]),
+            'fk_qw': float(q_sol[3]),
+            **{f'j{i+1}': float(joints[i]) for i in range(len(joints))},
+        })
+        return fb
 
     # ── Control loop (30 Hz) ─────────────────────────────────────────────────
 
@@ -1162,9 +1625,12 @@ class IkTeleopNode(Node):
                 target_quat = target_quat / n
 
         if len(joint_pos) < self._n_joints:
-            self.get_logger().warn_once(
-                f'Waiting for /joint_states ({len(joint_pos)}/{self._n_joints})')
+            if not self._joint_state_warned:
+                self.get_logger().warn(
+                    f'Waiting for /joint_states ({len(joint_pos)}/{self._n_joints})')
+                self._joint_state_warned = True
             return
+        self._joint_state_warned = False
 
         with self._lock:
             last_solved = self._last_solved_joints
@@ -1196,14 +1662,20 @@ class IkTeleopNode(Node):
 
         # Time budget: at 60Hz each tick has ~16ms.  Reserve ~4ms for snap fallback.
         tick_budget = 1.0 / self._rate_hz
+        is_6d_solve = self._ctrl_ori and target_quat is not None
         # Cap per-seed iterations for 6D IK so multiple seeds fit within
         # the time budget.  200 iters is enough for frame-to-frame deltas
         # with the relaxed convergence threshold (0.035 rad).
-        ik_iters = 200 if (self._ctrl_ori and target_quat is not None) else 500
-        result, winning_seed = self._try_ik(
-            target_pos, target_quat, seeds_to_try, log_fail=False,
+        ik_iters = 200 if is_6d_solve else 500
+        result, winner_meta = self._try_ik(
+            target_pos, target_quat, seeds_to_try,
+            last_solved=last_solved, joint_state=js_seed, log_fail=False,
             max_iters=ik_iters, time_budget=tick_budget * 0.7,
             pick_best=True)
+        sixd_trace = _copy_6d_trace_from_meta(winner_meta) if is_6d_solve else _empty_6d_trace()
+        winner_meta = _merge_6d_trace(winner_meta, sixd_trace)
+        sixd_trace_str = _format_6d_trace(sixd_trace)
+        winning_seed = str(winner_meta.get('seed', ''))
 
         # Reject solutions that require a large jump from the last commanded position.
         # Catches configuration flips (e.g. J4 ±180°) that are geometrically valid
@@ -1216,14 +1688,21 @@ class IkTeleopNode(Node):
         # pos-only fallback, which locks the arm in a configuration that can
         # never match the target orientation.
         jump_rejected = False
-        is_6d_solve = self._ctrl_ori and target_quat is not None
         if result is not None and self._max_joint_jump > 0.0 and last_solved is not None:
-            max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+            max_jump = winner_meta.get('max_jump')
+            if max_jump is None:
+                max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+                winner_meta = dict(winner_meta)
+                winner_meta['max_jump'] = max_jump
             if max_jump > self._max_joint_jump:
-                if is_6d_solve:
+                allow_large_jump = (
+                    is_6d_solve and winner_meta.get('winner_pool') == 'all'
+                )
+                if allow_large_jump:
                     self.get_logger().debug(
                         f'[ik] 6D jump allowed  max_jump={max_jump:.3f}rad  '
-                        f'seed={winning_seed}  vel_limiter will smooth')
+                        f'seed={winning_seed}  pool={winner_meta.get("winner_pool", "")}  '
+                        f'vel_limiter will smooth')
                 else:
                     self.get_logger().debug(
                         f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
@@ -1231,8 +1710,7 @@ class IkTeleopNode(Node):
                     self._log_csv_row(
                         t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
                         target_pos, raw_quat, target_quat,
-                        'JUMP_REJECT', winning_seed, max_jump, False,
-                        list(result), js_seed)
+                        'JUMP_REJECT', winner_meta, False, list(result), js_seed)
                     result = None
                     jump_rejected = True
                     self._diag_jump_rejects += 1
@@ -1244,38 +1722,73 @@ class IkTeleopNode(Node):
         # instead of going to 488mm fk_err.
         pos_only_fallback = False
         if result is None and self._ctrl_ori:
-            fb_seeds = det_seeds[:2]   # last_solved + joint_states only (fast)
-            result, winning_seed = self._try_ik(
-                target_pos, None, fb_seeds, log_fail=False,
-                time_budget=tick_budget * 0.2)
+            fb_seeds = [seed for seed in det_seeds if seed[0] in ('last_solved', 'joint_states')]
+            if not fb_seeds:
+                fb_seeds = det_seeds[:1]   # joint_states only on the first solve
+            result, winner_meta = self._try_ik(
+                target_pos, None, fb_seeds,
+                last_solved=last_solved, joint_state=js_seed, log_fail=False,
+                time_budget=tick_budget * 0.2, pick_best=True)
+            winner_meta = _merge_6d_trace(winner_meta, sixd_trace)
+            winning_seed = str(winner_meta.get('seed', ''))
             if result is not None:
                 pos_only_fallback = True
-                winning_seed = winning_seed + '/pos_only'
+                winner_meta = dict(winner_meta)
+                winner_meta['seed'] = winning_seed + '/pos_only'
+                winning_seed = str(winner_meta['seed'])
                 self._diag_pos_only_fb += 1
                 # Warn periodically when pos-only fallback fires — the user
                 # may not realise orientation is being silently dropped.
                 if self._diag_pos_only_fb in (1, 10, 50) or self._diag_pos_only_fb % 100 == 0:
                     self.get_logger().warn(
                         f'[ik] ORI_UNREACHABLE → pos-only fallback  count={self._diag_pos_only_fb}'
-                        f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
+                        + (f'  |  {sixd_trace_str}' if sixd_trace_str else '')
+                        + f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
                 # Re-check jump guard for the pos-only solution
                 if self._max_joint_jump > 0.0 and last_solved is not None:
-                    max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+                    max_jump = winner_meta.get('max_jump')
+                    if max_jump is None:
+                        max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+                        winner_meta['max_jump'] = max_jump
                     if max_jump > self._max_joint_jump:
                         self._log_csv_row(
                             t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
                             target_pos, raw_quat, target_quat,
-                            'JUMP_REJECT/pos_only', winning_seed, max_jump, False,
-                            list(result), js_seed)
+                            'JUMP_REJECT/pos_only', winner_meta, False, list(result), js_seed)
                         result = None
                         jump_rejected = True
                         self._diag_jump_rejects += 1
 
         used_snap = False
         if result is None:
-            result = self._snap_to_reachable(target_pos, target_quat, det_seeds)
+            result = self._snap_to_reachable(target_pos, target_quat)
             if result is not None:
                 used_snap = True
+                snap_candidate = build_candidate(
+                    label='snap',
+                    joints=result,
+                    last_solved=last_solved,
+                    joint_state=js_seed,
+                    q_preferred=self._q_preferred[:len(result)],
+                    seed_index=0,
+                    max_joint_jump=self._max_joint_jump,
+                )
+                winner_meta = _winner_meta(
+                    snap_candidate,
+                    {
+                        'valid_total': 1,
+                        'attempted_total': 1,
+                        'attempted_deterministic': 1,
+                        'attempted_random': 0,
+                        'time_budget_hit': False,
+                        'valid_deterministic': 1,
+                        'valid_random': 0,
+                        'valid_under_jump': 1 if snap_candidate.within_jump_limit else 0,
+                        'winner_pool': 'snap',
+                    },
+                )
+                winner_meta = _merge_6d_trace(winner_meta, sixd_trace)
+                winner_meta['seed_kind'] = 'snap'
                 winning_seed = 'snap'
                 self._diag_snaps += 1
                 p_snap, _, _ = _fk_and_jac(self._chain_data, np.array(result))
@@ -1283,28 +1796,38 @@ class IkTeleopNode(Node):
                 self.get_logger().warn(
                     f'[ik] SNAP: position partially unreachable — moved to workspace edge'
                     f'  |  snap_err={snap_err_mm:.1f}mm from target'
-                    f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
+                    + (f'  |  {sixd_trace_str}' if sixd_trace_str else '')
+                    + f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
 
         if result is None:
+            fail_cause = ('jump_guard blocked all solutions' if jump_rejected
+                          else 'position outside workspace' if not self._ctrl_ori
+                          else 'position AND orientation both unreachable')
+            best_failed_class = str(sixd_trace.get('ik6d_best_failed_class', '') or '')
+            if is_6d_solve and best_failed_class in ('orientation_only', 'near_position'):
+                fail_cause = 'orientation unreachable near current branch'
+            elif is_6d_solve and best_failed_class in ('position_only', 'near_orientation'):
+                fail_cause = 'position unreachable with requested orientation'
             if should_log:
                 self._ik_fail_log_time = t_tick_start
-                cause = ('jump_guard blocked all solutions' if jump_rejected
-                         else 'position outside workspace' if not self._ctrl_ori
-                         else 'position AND orientation both unreachable')
                 self.get_logger().error(
-                    f'[ik] FAIL: truly unreachable  cause={cause}'
-                    f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
+                    f'[ik] FAIL: truly unreachable  cause={fail_cause}'
+                    + (f'  |  {sixd_trace_str}' if sixd_trace_str else '')
+                    + f'  |  {_ik_diag_str(self._chain_data, last_solved, target_pos, target_quat)}')
             self._diag_fails += 1
+            self._record_diag_meta(winning_seed, winner_meta)
             self._log_csv_row(
                 t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
                 target_pos, raw_quat, target_quat,
-                'FAIL', '', None, False, None, js_seed)
+                'FAIL', winner_meta, False, None, js_seed)
             # Feedback: IK failed — include last known FK so Mac can resync boundary
-            _fb: dict = {'ik_ok': False}
-            if last_solved is not None:
-                _p, _, _ = _fk_and_jac(self._chain_data, np.array(last_solved))
-                _fb.update({'fk_x': float(_p[0]), 'fk_y': float(_p[1]),
-                            'fk_z': float(_p[2])})
+            _fb = self._feedback_from_solution(
+                last_solved,
+                ik_ok=False,
+                result_type='FAIL',
+                winner_meta=winner_meta,
+                fail_cause=fail_cause,
+            )
             with self._fk_feedback_lock:
                 self._fk_feedback = _fb
             return
@@ -1312,8 +1835,11 @@ class IkTeleopNode(Node):
         # ── Joint-space velocity limiting ─────────────────────────────────
         # Smooths transitions when IK re-acquires after traversing an
         # unreachable zone.  Each joint is clamped to max_joint_vel per tick.
-        pre_vel_max_jump = (max(abs(r - c) for r, c in zip(result, last_solved))
-                            if last_solved is not None else None)
+        pre_vel_max_jump = winner_meta.get('max_jump')
+        if pre_vel_max_jump is None and last_solved is not None:
+            pre_vel_max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+            winner_meta = dict(winner_meta)
+            winner_meta['max_jump'] = pre_vel_max_jump
         vel_clamped = False
         if last_solved is not None and self._max_joint_vel > 0.0:
             max_step = self._max_joint_vel / self._rate_hz
@@ -1336,11 +1862,17 @@ class IkTeleopNode(Node):
         solve_ms = (time.monotonic() - t_tick_start) * 1000.0
         self._diag_solve_ms_sum += solve_ms
         self._diag_solve_ms_max = max(self._diag_solve_ms_max, solve_ms)
-        self._diag_last_seed = winning_seed
+        self._record_diag_meta(winning_seed, winner_meta)
 
         # Per-tick debug log (visible with `ros2 run --log-level debug`)
         self.get_logger().debug(
-            f'[ik] solve={solve_ms:.1f}ms  seed={winning_seed}  '
+            f'[ik] solve={solve_ms:.1f}ms  seed={winning_seed}'
+            f'/{winner_meta.get("seed_kind", "")}  pool={winner_meta.get("winner_pool", "")}  '
+            f'local={_fmt_metric(winner_meta.get("continuity_cost"))}  '
+            f'js={_fmt_metric(winner_meta.get("joint_state_cost"))}  '
+            f'pref={_fmt_metric(winner_meta.get("posture_cost"))}  '
+            f'valid(det/rand/under)={winner_meta.get("valid_deterministic", 0)}/'
+            f'{winner_meta.get("valid_random", 0)}/{winner_meta.get("valid_under_jump", 0)}  '
             f'vel_clamp={vel_clamped}  snap={used_snap}  age={age*1000:.0f}ms  '
             f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})')
 
@@ -1349,17 +1881,6 @@ class IkTeleopNode(Node):
         with self._lock:
             self._last_solved_joints = list(result)
         self._diag_solves += 1
-
-        # Feedback: FK position of solved joints + IK quality flag + joint angles
-        _p_sol, _, _ = _fk_and_jac(self._chain_data, np.array(result))
-        with self._fk_feedback_lock:
-            self._fk_feedback = {
-                'fk_x': float(_p_sol[0]),
-                'fk_y': float(_p_sol[1]),
-                'fk_z': float(_p_sol[2]),
-                'ik_ok': not used_snap,   # False when arm snapped to nearest reachable
-                **{f'j{i+1}': float(result[i]) for i in range(len(result))},
-            }
 
         # Determine result type label for CSV
         if pos_only_fallback:
@@ -1370,11 +1891,23 @@ class IkTeleopNode(Node):
             csv_type = '6D'
         else:
             csv_type = '3D'
+        fail_cause = ''
+        if pos_only_fallback:
+            fail_cause = 'orientation unreachable near current branch'
+        elif used_snap:
+            fail_cause = 'position outside workspace'
+        with self._fk_feedback_lock:
+            self._fk_feedback = self._feedback_from_solution(
+                list(result),
+                ik_ok=not used_snap,
+                result_type=csv_type,
+                winner_meta=winner_meta,
+                fail_cause=fail_cause,
+            )
         self._log_csv_row(
             t_tick_start, solve_ms, age,
             target_pos, raw_quat, target_quat,
-            csv_type, winning_seed, pre_vel_max_jump, vel_clamped,
-            result, js_seed)
+            csv_type, winner_meta, vel_clamped, result, js_seed)
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -1394,6 +1927,16 @@ class IkTeleopNode(Node):
         solve_ms_sum = self._diag_solve_ms_sum; self._diag_solve_ms_sum = 0.0
         solve_ms_max = self._diag_solve_ms_max; self._diag_solve_ms_max = 0.0
         last_seed    = self._diag_last_seed
+        last_seed_kind = self._diag_last_seed_kind
+        last_pool = self._diag_last_pool
+        last_continuity = self._diag_last_continuity
+        last_joint_state = self._diag_last_joint_state
+        last_posture = self._diag_last_posture
+        last_valid_total = self._diag_last_valid_total
+        last_valid_det = self._diag_last_valid_det
+        last_valid_rand = self._diag_last_valid_rand
+        last_valid_under_jump = self._diag_last_valid_under_jump
+        last_ik6d_trace = self._diag_last_ik6d_trace
 
         if target_pos is None:
             self.get_logger().info('[diag] No socket data yet')
@@ -1436,7 +1979,14 @@ class IkTeleopNode(Node):
             f'ik_avg={avg_ms:.1f}ms ik_max={solve_ms_max:.1f}ms  '
             f'snaps={snaps} pos_only={pos_only_fb} vel_clamps={vel_clamps} '
             f'jump_rej={jump_rejects} deadband={deadbands}  '
-            f'seed={last_seed}{fk_err_str}{ori_err_str}  '
+            f'seed={last_seed}/{last_seed_kind} pool={last_pool}  '
+            f'valid={last_valid_total}(det={last_valid_det} rand={last_valid_rand} '
+            f'under={last_valid_under_jump})  '
+            f'local={_fmt_metric(last_continuity)} '
+            f'js={_fmt_metric(last_joint_state)} '
+            f'pref={_fmt_metric(last_posture)}'
+            + (f'  {last_ik6d_trace}' if last_ik6d_trace else '')
+            + f'{fk_err_str}{ori_err_str}  '
             f'tgt=({target_pos[0]:.3f},{target_pos[1]:.3f},{target_pos[2]:.3f})')
 
 

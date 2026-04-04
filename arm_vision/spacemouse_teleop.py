@@ -23,6 +23,7 @@ import os
 import sys
 import time
 from enum import Enum, auto
+from typing import Optional
 
 import numpy as np
 import yaml
@@ -318,6 +319,7 @@ def analyze_p_arc(
 
 class TeleopMode(Enum):
     MANUAL   = auto()
+    WAYPOINTS = auto()
     ASSEMBLY = auto()
     PICKUP   = auto()
     STORE    = auto()
@@ -393,6 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Path to pickup_params.yaml (enables pickup mode)')
     p.add_argument('--chassis',  default=None,
                    help='Path to chassis_params.yaml (enables STORE/FETCH modes)')
+    p.add_argument('--waypoints', default=None,
+                   help='Path to 6D waypoint YAML (enables WAYPOINTS mode)')
+    p.add_argument('--waypoint-sequence', default=None,
+                   help='Initial waypoint sequence name to select')
     p.add_argument('--difficulty', type=int, default=None,
                    help='Override difficulty level (1-4)')
     p.add_argument('--q-angle', type=float, default=None,
@@ -407,6 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--log-dir', default='.', metavar='DIR',
                    help='Directory for P-arc session .log files (default: current dir, '
                         'pass empty string to disable)')
+    p.add_argument('--competition', action='store_true',
+                   help='After PICKUP confirmed: auto-home then enter ASSEMBLY mode')
     return p
 
 
@@ -477,8 +485,42 @@ def main():
         chassis_fsm  = ChassisFSM(client, _chassis_cfg)
         print(f'[chassis] Loaded config from {args.chassis}')
 
+    waypoint_runner = None
+    pose_from_feedback = None
+    if args.waypoints:
+        try:
+            from pose_waypoint_runner import (
+                PoseWaypointRunner,
+                load_waypoint_sequences,
+                pose_from_feedback as _pose_from_feedback,
+            )
+            waypoint_sequences = load_waypoint_sequences(args.waypoints)
+        except Exception as exc:
+            sys.exit(f'[ERROR] Could not load waypoint config {args.waypoints}: {exc}')
+        waypoint_runner = PoseWaypointRunner(
+            waypoint_sequences,
+            log_dir=args.log_dir or '',
+        )
+        pose_from_feedback = _pose_from_feedback
+        if args.waypoint_sequence:
+            if args.waypoint_sequence not in waypoint_runner.sequence_names:
+                known = ', '.join(waypoint_runner.sequence_names)
+                sys.exit(
+                    f'[ERROR] Unknown waypoint sequence {args.waypoint_sequence!r}; '
+                    f'known sequences: {known}'
+                )
+            while waypoint_runner.selected_name != args.waypoint_sequence:
+                waypoint_runner.select_next_sequence()
+        print(
+            '[waypoints] Loaded sequences: '
+            + ', '.join(waypoint_runner.sequence_names)
+            + f' | selected: {waypoint_runner.selected_name}'
+        )
+
     # ── Build available mode cycle ─────────────────────────────────────────
     available_modes = [TeleopMode.MANUAL]
+    if waypoint_runner is not None:
+        available_modes.append(TeleopMode.WAYPOINTS)
     if asm_fsm is not None:
         available_modes.append(TeleopMode.ASSEMBLY)
     if pickup_fsm is not None:
@@ -491,9 +533,10 @@ def main():
     mode_idx = 0
 
     def cycle_mode():
-        nonlocal current_mode, mode_idx
+        nonlocal current_mode, mode_idx, _competition_post_home_mode
         mode_idx = (mode_idx + 1) % len(available_modes)
         current_mode = available_modes[mode_idx]
+        _competition_post_home_mode = None
 
         # Emergency-reset all FSMs
         if asm_fsm is not None:
@@ -529,6 +572,9 @@ def main():
     _homing_seen_running = False
     _homing_t            = 0.0
     _ik_was_failing      = False
+    _competition_post_home_mode: Optional[TeleopMode] = None
+    # Set to TeleopMode.ASSEMBLY when competition auto-home is triggered;
+    # cleared by the homing monitor after mode switch completes.
     # Homing requires RIGHT held for this long to prevent accidental triggers
     HOMING_HOLD_S        = 2.0
     ASSEMBLY_EXIT_HOLD_S = 1.5   # shorter hold exits assembly FSM → MANUAL
@@ -558,6 +604,7 @@ def main():
     _parc_log_file: object = None   # open file handle, or None when not logging
     _parc_log_path: str    = ''
     _parc_log_t0:  float   = 0.0
+    _last_waypoint_status: str = waypoint_runner.status.value if waypoint_runner is not None else ''
 
     mode_names = ' / '.join(m.name for m in available_modes)
     print(f'[spacemouse] Modes available: {mode_names}')
@@ -598,9 +645,19 @@ def main():
 
             # ── COMBO: cycle mode ─────────────────────────────────────────
             if event == 'COMBO':
+                if waypoint_runner is not None and waypoint_runner.is_active:
+                    _fb_wp = client.feedback if client is not None else {}
+                    waypoint_runner.cancel('mode_cycle', _fb_wp, ee_pos, ee_rot, now=now)
+                    if waypoint_runner.last_log_path:
+                        print(f'\n[waypoints] Sequence cancelled — log saved: {waypoint_runner.last_log_path}')
                 ee_pos, ee_rot = cycle_mode()
                 _right_hold_t    = None   # cancel any pending homing hold
                 _right_hold_fired = False
+                if _parc_log_file is not None:
+                    _parc_log_file.write(f'# session interrupted by mode-cycle\n')
+                    _parc_log_file.close()
+                    _parc_log_file = None
+                    _p_arc_recording = False
                 print(f'\n[spacemouse] Switched to mode: {current_mode.name}')
                 # Consume event — no further button processing this tick
                 event = 'NONE'
@@ -638,7 +695,10 @@ def main():
                 _right_hold_fired     = True   # suppress the 2 s homing
 
             # ── Homing (RIGHT held 2 s in MANUAL or PICKUP) ───────────────
-            _right_for_homing = _right_homing_trigger and current_mode == TeleopMode.MANUAL
+            _right_for_homing = (
+                _right_homing_trigger
+                and current_mode in (TeleopMode.MANUAL, TeleopMode.WAYPOINTS)
+            )
             _right_for_pickup = _right_homing_trigger and current_mode == TeleopMode.PICKUP
 
             # ── Mode dispatch ─────────────────────────────────────────────
@@ -647,8 +707,30 @@ def main():
                 from assembly_fsm import AssemblyState
 
                 if _right_asm_exit:
+                    # Capture last assembly orientation BEFORE reset to avoid IK discontinuity.
+                    # Forcing ee_rot = identity while the arm is physically at an assembly
+                    # orientation requires large joint movement → jump guard rejects all IK
+                    # solutions → arm appears frozen (including in Y-translation).
+                    _last_asm_rot = asm_fsm.rotation_override
                     asm_fsm.emergency_reset()
                     _p_arc_recording = False
+                    if _parc_log_file is not None:
+                        _parc_log_file.write('# session interrupted by assembly exit\n')
+                        _parc_log_file.close()
+                        _parc_log_file = None
+                    # Resync EE pose to hardware FK so MANUAL starts from actual position
+                    if client is not None:
+                        _fb_exit = client.feedback
+                        if 'fk_x' in _fb_exit:
+                            ee_pos = np.clip(
+                                np.array([_fb_exit['fk_x'], _fb_exit['fk_y'], _fb_exit['fk_z']]),
+                                cfg['pos_min'], cfg['pos_max'])
+                    # Preserve assembly orientation if one was active; keeps IK near current
+                    # joint configuration so Y/X/Z translation works immediately on re-entry
+                    # to MANUAL.  Only fall back to init_quat when no override was set.
+                    if _last_asm_rot is not None:
+                        ee_rot = _last_asm_rot
+                    # else: keep ee_rot as-is — FSM was not locking orientation
                     current_mode = TeleopMode.MANUAL
                     mode_idx     = available_modes.index(TeleopMode.MANUAL)
                     print('\n[spacemouse] Assembly exited — back to MANUAL')
@@ -739,7 +821,7 @@ def main():
                 else:
                     rot_override = asm_fsm.rotation_override
 
-                    if asm_fsm.translation_allowed:
+                    if asm_fsm.translation_allowed and not _right_asm_exit:
                         if asm_fsm.state == AssemblyState.APPROACH and rot_override is not None:
                             # EE-frame navigation: project SpaceMouse axes onto the
                             # current EE frame so that:
@@ -870,6 +952,29 @@ def main():
                 if pos_override is not None:
                     ee_pos = pos_override
 
+                # ── Competition auto-handoff ───────────────────────────────────────
+                if (args.competition
+                        and pickup_fsm.state == PickupState.CONFIRMED
+                        and not _homing_active
+                        and _competition_post_home_mode is None
+                        and TeleopMode.ASSEMBLY in available_modes):
+                    pickup_fsm.emergency_reset()
+                    current_mode = TeleopMode.PICKUP   # stay in PICKUP while homing
+                    if client is not None:
+                        client.send_home()
+                        _homing_active            = True
+                        _homing_seen_running      = False
+                        _homing_t                 = time.monotonic()
+                        _competition_post_home_mode = TeleopMode.ASSEMBLY
+                        print('\n[COMPETITION] Pickup confirmed — homing and entering ASSEMBLY')
+                    else:
+                        # No socket: jump directly to ASSEMBLY without physical homing
+                        current_mode = TeleopMode.ASSEMBLY
+                        mode_idx     = available_modes.index(TeleopMode.ASSEMBLY)
+                        if asm_fsm is not None:
+                            asm_fsm.emergency_reset()
+                        print('\n[COMPETITION] No socket — skipping home, entering ASSEMBLY')
+
             elif current_mode in (TeleopMode.STORE, TeleopMode.FETCH) and chassis_fsm is not None:
                 from chassis_fsm import ChassisOperation
                 _chassis_op = (ChassisOperation.STORE
@@ -885,9 +990,82 @@ def main():
                 _fb_chassis = client.feedback if client is not None else {}
                 chassis_fsm.tick(_fb_chassis, dt)
                 if chassis_fsm.done:
+                    chassis_fsm.emergency_reset()
+                    # Resync EE pose to hardware FK so MANUAL starts from actual position
+                    if client is not None:
+                        _fb_exit = client.feedback
+                        if 'fk_x' in _fb_exit:
+                            ee_pos = np.clip(
+                                np.array([_fb_exit['fk_x'], _fb_exit['fk_y'], _fb_exit['fk_z']]),
+                                cfg['pos_min'], cfg['pos_max'])
+                    ee_rot = Rotation.from_quat(cfg['init_quat'])
                     current_mode = TeleopMode.MANUAL
                     mode_idx = available_modes.index(TeleopMode.MANUAL)
-                    chassis_fsm.emergency_reset()
+
+            elif current_mode == TeleopMode.WAYPOINTS and waypoint_runner is not None:
+                _fb_wp = client.feedback if client is not None else {}
+
+                if event == 'RIGHT' and not waypoint_runner.is_active:
+                    _selected = waypoint_runner.select_next_sequence()
+                    print(f'\n[waypoints] Selected sequence: {_selected}')
+
+                if event == 'LEFT':
+                    if waypoint_runner.is_active:
+                        waypoint_runner.cancel('button_cancel', _fb_wp, ee_pos, ee_rot, now=now)
+                        _target_pos, _target_rot = waypoint_runner.current_target_pose
+                        if _target_pos is not None and _target_rot is not None:
+                            ee_pos = np.clip(_target_pos, cfg['pos_min'], cfg['pos_max'])
+                            ee_rot = _target_rot
+                        if waypoint_runner.last_log_path:
+                            print(f'\n[waypoints] Sequence cancelled — log saved: {waypoint_runner.last_log_path}')
+                    else:
+                        if pose_from_feedback is not None:
+                            _start_pos, _start_rot, _src = pose_from_feedback(_fb_wp, ee_pos, ee_rot)
+                        else:
+                            _start_pos, _start_rot, _src = ee_pos.copy(), ee_rot, 'command'
+                        _start_pos = np.clip(_start_pos, cfg['pos_min'], cfg['pos_max'])
+                        if waypoint_runner.start(_start_pos, _start_rot, now=now):
+                            ee_pos, ee_rot = waypoint_runner.tick(_fb_wp, _start_pos, _start_rot, now=now)
+                            print(
+                                f'\n[waypoints] Started {waypoint_runner.selected_name} '
+                                f'from {_src} pose'
+                                + (f' | log: {waypoint_runner.last_log_path}'
+                                   if waypoint_runner.last_log_path else '')
+                            )
+
+                if not waypoint_runner.is_active:
+                    ee_pos = np.clip(ee_pos + delta_p, cfg['pos_min'], cfg['pos_max'])
+                    if cfg['control_orientation']:
+                        ee_rot = Rotation.from_rotvec(delta_r) * ee_rot
+
+                    if client is not None and not _homing_active:
+                        fb = client.feedback
+                        ik_ok = fb.get('ik_ok', True)
+                        if _ik_was_failing and ik_ok and 'fk_x' in fb:
+                            ee_pos = np.clip(
+                                np.array([fb['fk_x'], fb['fk_y'], fb['fk_z']]),
+                                cfg['pos_min'], cfg['pos_max'])
+                            _ik_was_failing = False
+                            print('[spacemouse] IK recovered — resynced to FK')
+                        elif not ik_ok:
+                            _ik_was_failing = True
+                else:
+                    ee_pos, ee_rot = waypoint_runner.tick(_fb_wp, ee_pos, ee_rot, now=now)
+                    ee_pos = np.clip(ee_pos, cfg['pos_min'], cfg['pos_max'])
+
+                if _right_for_homing and not _homing_active:
+                    if waypoint_runner.is_active:
+                        waypoint_runner.cancel('home', _fb_wp, ee_pos, ee_rot, now=now)
+                        if waypoint_runner.last_log_path:
+                            print(f'\n[waypoints] Sequence cancelled for homing — log saved: {waypoint_runner.last_log_path}')
+                    if client is not None:
+                        client.send_home()
+                        _homing_active       = True
+                        _homing_seen_running = False
+                        _homing_t            = time.monotonic()
+                        print('\n[spacemouse] Homing command sent — streaming paused')
+                    else:
+                        print('[spacemouse] No socket — skipping homing')
 
             else:
                 # ── MANUAL mode ───────────────────────────────────────────
@@ -936,6 +1114,13 @@ def main():
                         _homing_active  = False
                         _arm_ready      = True
                         _ik_was_failing = False
+                        if _competition_post_home_mode is not None and _competition_post_home_mode in available_modes:
+                            current_mode = _competition_post_home_mode
+                            mode_idx     = available_modes.index(_competition_post_home_mode)
+                            if asm_fsm is not None:
+                                asm_fsm.emergency_reset()
+                            print(f'\n[COMPETITION] Homing done — entering {_competition_post_home_mode.name}')
+                            _competition_post_home_mode = None
                     # else: fk_x not yet in feedback — keep waiting this tick;
                     # the node will send it within the next 100 ms feedback interval.
                 elif elapsed > 15.0:
@@ -950,6 +1135,13 @@ def main():
                     _homing_active  = False
                     _arm_ready      = True
                     _ik_was_failing = False
+                    if _competition_post_home_mode is not None and _competition_post_home_mode in available_modes:
+                        current_mode = _competition_post_home_mode
+                        mode_idx     = available_modes.index(_competition_post_home_mode)
+                        if asm_fsm is not None:
+                            asm_fsm.emergency_reset()
+                        print(f'\n[COMPETITION] Homing done — entering {_competition_post_home_mode.name}')
+                        _competition_post_home_mode = None
 
             # ── Send pose ─────────────────────────────────────────────────
             if _arm_ready and not _homing_active:
@@ -975,6 +1167,8 @@ def main():
                     else:
                         _arc_deg = 0.0
                     mode_hdr = f'  [P-ARC RECORD] swept {_arc_deg:.1f}° — LEFT to finish'
+                elif _competition_post_home_mode is not None:
+                    mode_hdr = f'  [COMPETITION] HOMING → {_competition_post_home_mode.name}...'
                 else:
                     mode_hdr = f'  [{current_mode.name}]  (BOTH to switch){hold_hint}'
 
@@ -993,10 +1187,39 @@ def main():
                 elif current_mode in (TeleopMode.STORE, TeleopMode.FETCH) and chassis_fsm is not None:
                     render_chassis(chassis_fsm, _fb,
                                    mode_header=mode_hdr, first=(tick == 0))
+                elif current_mode == TeleopMode.WAYPOINTS and waypoint_runner is not None:
+                    _wp_hint = 'LEFT=start RIGHT=next' if not waypoint_runner.is_active else 'LEFT=cancel'
+                    _wp_hdr = f'  [WAYPOINTS] {waypoint_runner.status_text}  ({_wp_hint}, BOTH=switch){hold_hint}'
+                    render_pose(ee_pos, sm_ang, cfg['pos_min'], cfg['pos_max'],
+                                cfg['init_pos'], _fb,
+                                header=_wp_hdr, first=(tick == 0))
                 else:
                     render_pose(ee_pos, sm_ang, cfg['pos_min'], cfg['pos_max'],
                                 cfg['init_pos'], _fb,
                                 header=mode_hdr, first=(tick == 0))
+
+            if waypoint_runner is not None:
+                _wp_status = waypoint_runner.status.value
+                if _wp_status != _last_waypoint_status:
+                    _last_waypoint_status = _wp_status
+                    if _wp_status == 'succeeded':
+                        print(
+                            f'\n[waypoints] Sequence complete: {waypoint_runner.selected_name}'
+                            + (f' | log: {waypoint_runner.last_log_path}'
+                               if waypoint_runner.last_log_path else '')
+                        )
+                    elif _wp_status == 'failed':
+                        print(
+                            f'\n[waypoints] Sequence failed: {waypoint_runner.status_text}'
+                            + (f' | log: {waypoint_runner.last_log_path}'
+                               if waypoint_runner.last_log_path else '')
+                        )
+                    elif _wp_status == 'cancelled':
+                        print(
+                            f'\n[waypoints] Sequence cancelled: {waypoint_runner.status_text}'
+                            + (f' | log: {waypoint_runner.last_log_path}'
+                               if waypoint_runner.last_log_path else '')
+                        )
 
             tick += 1
 

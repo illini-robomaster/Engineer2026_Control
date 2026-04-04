@@ -10,6 +10,7 @@ Args:
   host         : TCP bind address  (default: 0.0.0.0)
   port         : TCP bind port     (default: 9999)
   teleop_mode  : "servo" | "ik_direct" | "moveit"  (default: "servo")
+  debug_log    : ik_direct CSV log path (default: "")
 
 NOTE — keyboard teleop must be run in a separate terminal (it needs a real TTY):
   source install/setup.bash
@@ -41,6 +42,7 @@ def generate_launch_description():
     teleop_mode     = LaunchConfiguration('teleop_mode')
     ctrl_ori        = LaunchConfiguration('control_orientation')
     ori_weight      = LaunchConfiguration('ori_weight')
+    debug_log       = LaunchConfiguration('debug_log')
 
     is_servo  = PythonExpression(["'", teleop_mode, "' == 'servo'"])
     is_ik     = PythonExpression(["'", teleop_mode, "' == 'ik_direct'"])
@@ -69,7 +71,8 @@ def generate_launch_description():
             robot_description,
             {'host': host, 'port': port,
              'control_orientation': ctrl_ori,
-             'ori_weight': ori_weight},
+             'ori_weight': ori_weight,
+             'debug_log': debug_log},
         ],
         condition=IfCondition(is_ik),
     )
@@ -97,8 +100,10 @@ def generate_launch_description():
                               description='"ik_direct" (default) | "servo" | "moveit"'),
         DeclareLaunchArgument('control_orientation', default_value='false',
                               description='ik_direct: true=6D pose IK, false=position-only'),
-        DeclareLaunchArgument('ori_weight', default_value='1.0',
+        DeclareLaunchArgument('ori_weight', default_value='0.5',
                               description='ik_direct 6D mode: orientation error weight'),
+        DeclareLaunchArgument('debug_log', default_value='',
+                              description='ik_direct CSV log path; empty disables file logging'),
         socket_teleop,
         ik_teleop,
         moveit_teleop,

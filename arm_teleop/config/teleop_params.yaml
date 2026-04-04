@@ -4,9 +4,9 @@
 # Three teleop modes (select with teleop_mode argument in bringup):
 #
 #   ik_direct (DEFAULT)
-#     PyKDL LMA inverse kinematics, seeded from current joints.
-#     Deterministic — always finds the nearest IK solution (minimum joint
-#     motion).  Best for reaching a static or slow-moving target.
+#     Numpy DLS inverse kinematics with continuity-first candidate ranking.
+#     Deterministic seeds stay on the current branch during normal teleop;
+#     random seeds are still searched near workspace edges for recovery.
 #
 #   servo
 #     DLS Jacobian velocity controller with null-space posture control.
@@ -104,9 +104,9 @@ ik_teleop_node:
     ee_ori_offset_pitch: 0.0
     ee_ori_offset_yaw:   0.0
 
-    # Extra random seeds tried after deterministic seeds fail.
-    # Higher values improve coverage near workspace edges at the cost of ~7 ms
-    # worst-case per control tick (still well within the 16 ms budget at 60 Hz).
+    # Extra random seeds tried alongside deterministic continuity seeds.
+    # They improve coverage near workspace edges, but winner selection still
+    # prefers the current branch unless no under-jump local solution exists.
     n_random_seeds: 15
 
     # Velocity-adaptive EMA smoothing on incoming target pose.
@@ -120,7 +120,10 @@ ik_teleop_node:
     pose_alpha_threshold_m: 0.002
 
     # Per-tick CSV debug log.  Set to a file path to enable (e.g. "/tmp/ik_debug.csv").
-    # Captures target pose, IK result, joints, FK, orientation error per axis.
+    # Captures target pose, IK result, joints, FK, orientation error per axis,
+    # and the closest failed 6D attempt (seed, seed kind, residuals, sigma_min, budget hit).
+    # The same solve metadata is also mirrored into the TCP feedback stream so
+    # arm_vision waypoint runs can log client-side sequencing and solver state together.
     # Leave empty to disable.
     debug_log: ""
 

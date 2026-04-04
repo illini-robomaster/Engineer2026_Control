@@ -160,6 +160,7 @@ def generate_launch_description():
     debug_rx        = LaunchConfiguration('debug_rx')
     control_orientation = LaunchConfiguration('control_orientation')
     ori_weight          = LaunchConfiguration('ori_weight')
+    debug_log           = LaunchConfiguration('debug_log')
 
     # servo_node is only needed when teleop_mode=='servo'; ik_direct and moveit use
     # /arm_controller/joint_trajectory directly, so servo_node is not required.
@@ -186,6 +187,7 @@ def generate_launch_description():
             'teleop_mode':         teleop_mode,
             'control_orientation': control_orientation,
             'ori_weight':          ori_weight,
+            'debug_log':           debug_log,
         }.items(),
         condition=IfCondition(use_teleop),
     )
@@ -233,8 +235,10 @@ def generate_launch_description():
         DeclareLaunchArgument('debug_rx',        default_value='false'),
         DeclareLaunchArgument('control_orientation', default_value='false',
             description='ik_direct mode: true=6D pose IK, false=position-only (default)'),
-        DeclareLaunchArgument('ori_weight',      default_value='1.0',
+        DeclareLaunchArgument('ori_weight',      default_value='0.5',
             description='ik_direct 6D mode: orientation error weight (tune if pitch lags)'),
+        DeclareLaunchArgument('debug_log',       default_value='',
+            description='ik_direct CSV log path; forwarded to arm_teleop when teleop is enabled'),
 
         moveit_launch,
         teleop_launch,

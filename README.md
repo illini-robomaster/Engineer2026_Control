@@ -2,9 +2,14 @@
 
 Control stack for the **Illini RoboMaster** Engineer robot (2026 cycle).
 
-This repository contains ROS 2 Humble packages for a **6-DOF robotic arm**: URDF description, ros2\_control setup, MoveIt2 motion planning, and teleoperation via AprilTag cube or keyboard.  It targets an OrangePi SBC communicating with an MCU (ESP32/STM32) over UART.
+This repository contains ROS 2 Humble packages for a **6-DOF robotic arm**: URDF description, `ros2_control`, MoveIt2 planning, direct numerical IK teleop, UART hardware integration, and standalone teleop clients in `arm_vision/`.
 
-The arm is teleoperated using an AprilTag cube held by the operator.  A **standalone Python client** (`arm_vision/`) handles all camera work — calibration, AprilTag detection, and pose estimation — and streams the target end-effector pose to the ROS stack over a plain TCP socket.  No ROS is required on the client machine.
+The current teleop paths are:
+- AprilTag vision client (`arm_vision/main.py`)
+- SpaceMouse 6D teleop and waypoint playback (`arm_vision/spacemouse_teleop.py`)
+- Deterministic workspace probe for IK regression testing (`scripts/workspace_pose_sender.py`)
+
+The ROS machine runs the control stack and listens for absolute EE target poses over a plain TCP socket. The `arm_vision/` side does not require ROS.
 
 ---
 
@@ -41,8 +46,8 @@ The arm is teleoperated using an AprilTag cube held by the operator.  A **standa
 | `arm_teleop/` | `socket_teleop_node` (TCP receiver + P-controller) and `keyboard_teleop_node` |
 | `arm_hardware/` | UART bridge node, homing node — communicate with the MCU over UART |
 | `arm_bringup/` | Top-level launch that ties all ROS packages together |
-| `arm_vision/` | Standalone Python client: camera cal, cube cal, detection, socket sender |
-| `scripts/` | Shell helpers for setup, build, and launch |
+| `arm_vision/` | Standalone Python tools: AprilTag vision, SpaceMouse teleop, 6D waypoint runner |
+| `scripts/` | Shell helpers plus deterministic task-space probes and emulator tools |
 
 ---
 
@@ -78,6 +83,116 @@ Or use the helper script (builds then launches):
 ```bash
 bash scripts/run_ros2_humble_moveit_control.sh
 ```
+
+---
+
+## Quick Start
+
+### Fastest repeatable IK test
+
+If you only want to validate `ik_direct` and log failures, use the helper below after building:
+
+```bash
+bash scripts/run_workspace_probe_test.sh
+```
+
+What it does:
+- starts `robotic_arm_v4_urdf/control.launch.py` headless
+- starts `arm_teleop/launch/teleop.launch.py` in `ik_direct` mode
+- enables node-side CSV logging with `debug_log`
+- runs the deterministic URDF-derived workspace probe
+
+Logs:
+- `ik_teleop_node` CSV: `/tmp/ik_workspace_debug.csv`
+- workspace probe CSV: `/tmp/workspace_probe/workspace_probe_*.csv`
+- ROS stdout/stderr logs: `/tmp/codex-ros-home/log/`
+
+Useful variants:
+
+```bash
+# Position-only baseline:
+bash scripts/run_workspace_probe_test.sh --pos-only
+
+# Denser shell sampling:
+bash scripts/run_workspace_probe_test.sh --max-shell-points 16
+```
+
+### Manual 3-terminal test
+
+Use this when you want direct control over each process.
+
+Terminal 1:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch robotic_arm_v4_urdf control.launch.py use_rviz:=false use_real_robot:=false
+```
+
+Terminal 2:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch arm_teleop teleop.launch.py \
+  teleop_mode:=ik_direct \
+  control_orientation:=true \
+  debug_log:=/tmp/ik_workspace_debug.csv
+```
+
+Terminal 3:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+python3 scripts/workspace_pose_sender.py --log-dir /tmp/workspace_probe
+```
+
+Use `control_orientation:=false` in Terminal 2 if you want the position-only comparison run.
+
+### SpaceMouse waypoint test
+
+This is the shortest path for replaying multiple 6D waypoints from different starting poses.
+
+Terminal 1:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch robotic_arm_v4_urdf control.launch.py use_rviz:=false use_real_robot:=false
+```
+
+Terminal 2:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch arm_teleop teleop.launch.py \
+  teleop_mode:=ik_direct \
+  control_orientation:=true \
+  debug_log:=/tmp/ik_waypoints_debug.csv
+```
+
+Terminal 3:
+
+```bash
+cd arm_vision
+python3 spacemouse_teleop.py \
+  --host 127.0.0.1 \
+  --port 9999 \
+  --waypoints config/pose_waypoints.yaml \
+  --log-dir /tmp/spacemouse_waypoints
+```
+
+Waypoint controls in `WAYPOINTS` mode:
+- `LEFT`: start the selected sequence, or cancel the active sequence
+- `RIGHT`: select the next sequence while idle
+- `LEFT+RIGHT`: cycle between `MANUAL`, `WAYPOINTS`, and other enabled modes
+- hold `RIGHT` for 2 seconds: home and resync from the arm's current FK pose
+
+Logs:
+- node CSV: `/tmp/ik_waypoints_debug.csv`
+- client CSV: `/tmp/spacemouse_waypoints/waypoints_*.csv`
 
 ---
 
@@ -119,6 +234,13 @@ python main.py run --host <ros-host-ip> --show
 
 The client opens the webcam, detects the AprilTag cube, maps its pose to a
 target EE position, and streams it to the ROS `socket_teleop_node` at 30 Hz.
+
+For SpaceMouse teleop instead of AprilTag vision:
+
+```bash
+cd arm_vision
+python3 spacemouse_teleop.py --host <ros-host-ip> --port 9999
+```
 
 ### 3 — Homing (real robot only)
 
@@ -339,6 +461,10 @@ Edit `arm_vision/config/workspace.yaml` to match your physical setup:
 | `use_teleop` | `true` | `false` to skip socket\_teleop and use MoveIt Plan+Execute directly |
 | `socket_host` | `0.0.0.0` | TCP bind address for the pose socket |
 | `socket_port` | `9999` | TCP bind port for the pose socket |
+| `teleop_mode` | `ik_direct` | `ik_direct`, `servo`, or `moveit` |
+| `control_orientation` | `false` | `ik_direct` only: `true` = 6D pose IK, `false` = position-only |
+| `ori_weight` | `1.0` | `ik_direct` 6D orientation error weight |
+| `debug_log` | `""` | `ik_direct` CSV log path; empty disables file logging |
 | `use_moveit_rviz` | `true` | Show MoveIt2 RViz panel |
 | `run_homing` | `false` | Run sequential homing on startup (real robot only) |
 | `print_joints` | `false` | Print live joint angles + MoveIt plan goals to terminal |
