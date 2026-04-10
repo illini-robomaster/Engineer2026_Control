@@ -43,6 +43,7 @@ def generate_launch_description():
     ctrl_ori        = LaunchConfiguration('control_orientation')
     ori_weight      = LaunchConfiguration('ori_weight')
     debug_log       = LaunchConfiguration('debug_log')
+    use_moveit_ik   = LaunchConfiguration('use_moveit_ik')
 
     is_servo  = PythonExpression(["'", teleop_mode, "' == 'servo'"])
     is_ik     = PythonExpression(["'", teleop_mode, "' == 'ik_direct'"])
@@ -72,7 +73,8 @@ def generate_launch_description():
             {'host': host, 'port': port,
              'control_orientation': ctrl_ori,
              'ori_weight': ori_weight,
-             'debug_log': debug_log},
+             'debug_log': debug_log,
+             'use_moveit_ik': use_moveit_ik},
         ],
         condition=IfCondition(is_ik),
     )
@@ -104,6 +106,8 @@ def generate_launch_description():
                               description='ik_direct 6D mode: orientation error weight'),
         DeclareLaunchArgument('debug_log', default_value='',
                               description='ik_direct CSV log path; empty disables file logging'),
+        DeclareLaunchArgument('use_moveit_ik', default_value='false',
+                              description='ik_direct: true=use MoveIt IK service, false=custom DLS'),
         socket_teleop,
         ik_teleop,
         moveit_teleop,

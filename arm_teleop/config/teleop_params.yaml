@@ -31,17 +31,14 @@ ik_teleop_node:
     base_frame: "base_link"
     ee_frame:   "End_Effector"
 
-    # IK solve + publish rate.  60 Hz halves the worst-case stale-pose window
-    # (33 ms → 16 ms).  IK solves in <2 ms so the 16 ms budget is ample.
-    # Camera is still 30 fps, but the faster tick reduces wait after TCP arrival.
-    publish_rate_hz: 60.0
+    # IK solve + publish rate.  20 Hz provides ~50ms latency, acceptable for
+    # MoveIt-based IK which has higher (10ms) solver timeout.
+    # At 60 Hz, KDL would timeout frequently and timeout doesn't guarantee success.
+    publish_rate_hz: 20.0
 
-    # Trajectory time_from_start.  Three 60 Hz periods — the controller always
-    # has a target ahead of it and interpolates smoothly through the command
-    # stream instead of reaching each waypoint and stopping to wait.
-    # At 30 deg/s P-arc (201.5 mm radius) this is ~2.6 mm of look-ahead, well
-    # within IK accuracy.  If the arm faults on velocity limits, raise further.
-    traj_duration_s: 0.050   # 50 ms ~= 3x the 60 Hz period
+    # Trajectory time_from_start.  50ms is 1 control loop period at 20 Hz.
+    # The controller interpolates smoothly between updates.
+    traj_duration_s: 0.050   # 50 ms = 1x the 20 Hz period
 
     # Suppress IK re-solve when the commanded joints change by less than this.
     # 0.001 rad (~0.06°) is tight enough to block encoder noise while publishing

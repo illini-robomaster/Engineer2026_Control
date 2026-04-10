@@ -67,6 +67,7 @@ from .ik_selection import (
     choose_best_candidate,
     seed_kind_from_label,
 )
+from .ik_service_wrapper import IkServiceWrapper
 
 
 # ── Pure-numpy FK + geometric Jacobian ───────────────────────────────────────
@@ -540,6 +541,7 @@ class IkTeleopNode(Node):
         off_y = p('ee_ori_offset_yaw',   0.0)
         self._ee_ori_offset  = _rpy_to_quat(off_r, off_p, off_y)
         robot_desc           = p('robot_description',   '')
+        use_moveit_ik        = p('use_moveit_ik',       False)
 
         # ── Publisher ────────────────────────────────────────────────────────
         self._traj_pub = self.create_publisher(
@@ -642,6 +644,24 @@ class IkTeleopNode(Node):
         else:
             self.get_logger().error(
                 'robot_description parameter is empty -- node will not move the arm.')
+
+        # ── MoveIt IK service wrapper (optional) ──────────────────────────────
+        self._use_moveit_ik    = use_moveit_ik
+        self._ik_service       = None
+        self._moveit_ik_wins   = 0
+        self._custom_ik_wins   = 0
+
+        if self._use_moveit_ik:
+            try:
+                self._ik_service = IkServiceWrapper(self, service_timeout_sec=1.0)
+                self.get_logger().info(
+                    f'MoveIt IK service available: {self._ik_service.is_available()}'
+                )
+            except Exception as e:
+                self.get_logger().warn(f'MoveIt IK service init failed: {e}')
+                self._ik_service = None
+        else:
+            self.get_logger().info('Using custom DLS IK (use_moveit_ik=false)')
 
         # ── MoveIt joint-space planning ───────────────────────────────────────
         self._joints_plan_time   = p('joints_plan_time_s',    5.0)
@@ -1297,91 +1317,81 @@ class IkTeleopNode(Node):
         time_budget: float = 0.0,
         pick_best: bool = False,
     ) -> tuple[Optional[list], dict]:
-        """Try each (label, seed) pair; return (solution, winner metadata).
-
-        time_budget: if > 0, stop trying seeds after this many seconds elapsed.
-        pick_best:   if True, try ALL seeds within the time budget and return
-                     the solution that best preserves continuity with the
-                     current arm state. q_preferred is only a weak tie-breaker.
-                     If False (default), return the first valid solution found.
         """
-        t0 = time.monotonic() if time_budget > 0.0 else 0.0
-
-        candidates: list[IkCandidate] = []
-        attempted_total = 0
-        attempted_deterministic = 0
-        attempted_random = 0
-        time_budget_hit = False
-        best_failed_6d: Optional[dict] = None
-
-        for seed_index, (label, s) in enumerate(seeds):
-            if time_budget > 0.0 and (time.monotonic() - t0) > time_budget:
-                time_budget_hit = True
-                break
-            seed_kind = seed_kind_from_label(label)
-            attempted_total += 1
-            if seed_kind == 'random':
-                attempted_random += 1
-            else:
-                attempted_deterministic += 1
-            seed_diag = {} if (self._ctrl_ori and target_quat is not None) else None
-            if self._ctrl_ori and target_quat is not None:
-                result = self._solve_ik_6d(
-                    target_pos, target_quat, s, label, log_fail,
-                    max_iters=max_iters, diag_out=seed_diag)
-            else:
-                result = self._solve_ik_pos_only(
-                    target_pos, s, label, log_fail, max_iters=max_iters)
+        Solve IK using MoveIt service.
+        
+        Returns (joints, metadata) where:
+          joints: list of joint angles on success, None on failure
+          metadata: dict with IK statistics
+        """
+        if self._ik_service is None or not self._ik_service.is_available():
+            self.get_logger().warn('MoveIt IK service not available')
+            return None, {'moveit_available': False}
+        
+        # Use strongest seed: last_solved > joint_state > zero
+        best_seed = None
+        seed_source = 'zero'
+        if last_solved is not None:
+            best_seed = last_solved
+            seed_source = 'last_solved'
+        elif joint_state is not None:
+            best_seed = joint_state
+            seed_source = 'joint_state'
+        else:
+            best_seed = [0.0] * self._n_joints
+        
+        try:
+            result = self._ik_service.solve_ik_blocking(
+                target_pos,
+                target_quat if target_quat is not None else np.array([0, 0, 0, 1]),
+                best_seed,
+                self._joint_names,
+                group_name='arm',
+                base_frame=self._base_frame,
+                max_wall_time_sec=0.005,  # 5ms hard limit
+            )
+            
             if result is not None:
-                candidate = build_candidate(
-                    label=label,
-                    joints=result,
-                    last_solved=last_solved,
-                    joint_state=joint_state,
-                    q_preferred=self._q_preferred[:len(result)],
-                    seed_index=seed_index,
-                    max_joint_jump=self._max_joint_jump,
-                )
-                candidates.append(candidate)
-                if not pick_best:
-                    summary = _attempt_summary(
-                        attempted_total,
-                        attempted_deterministic,
-                        attempted_random,
-                        time_budget_hit,
-                        best_failed_6d,
-                    )
-                    summary.update({
-                        'valid_total': 1,
-                        'valid_deterministic': 1 if candidate.seed_kind == 'deterministic' else 0,
-                        'valid_random': 1 if candidate.seed_kind == 'random' else 0,
-                        'valid_under_jump': 1 if candidate.within_jump_limit else 0,
-                        'winner_pool': 'first_valid',
-                    })
-                    return list(candidate.joints), _winner_meta(
-                        candidate,
-                        summary,
-                    )
-            elif seed_diag is not None:
-                seed_diag.update({
-                    'label': label,
-                    'seed_kind': seed_kind,
-                    'seed_index': seed_index,
-                })
-                if best_failed_6d is None or _failed_6d_sort_key(seed_diag) < _failed_6d_sort_key(best_failed_6d):
-                    best_failed_6d = dict(seed_diag)
-
-        winner, summary = choose_best_candidate(candidates)
-        attempt_meta = _attempt_summary(
-            attempted_total,
-            attempted_deterministic,
-            attempted_random,
-            time_budget_hit,
-            best_failed_6d,
-        )
-        if winner is None:
-            return None, _winner_meta(None, attempt_meta)
-        return list(winner.joints), _winner_meta(winner, {**summary, **attempt_meta})
+                self._moveit_ik_wins += 1
+                metadata = {
+                    'seed': seed_source,
+                    'seed_kind': 'deterministic',
+                    'winner_pool': 'moveit',
+                    'valid_total': 1,
+                    'valid_deterministic': 1,
+                    'valid_random': 0,
+                    'valid_under_jump': 1,
+                    'attempted_total': 1,
+                    'attempted_deterministic': 1,
+                    'attempted_random': 0,
+                    'time_budget_hit': False,
+                    'continuity_cost': None,
+                    'joint_state_cost': None,
+                    'posture_cost': None,
+                    'max_jump': None,
+                }
+                return list(result), metadata
+            else:
+                metadata = {
+                    'seed': '',
+                    'seed_kind': '',
+                    'winner_pool': '',
+                    'valid_total': 0,
+                    'valid_deterministic': 0,
+                    'valid_random': 0,
+                    'valid_under_jump': 0,
+                    'attempted_total': 1,
+                    'attempted_deterministic': 1,
+                    'attempted_random': 0,
+                    'time_budget_hit': False,
+                }
+                if log_fail:
+                    self.get_logger().warn(f'IK failed for target {target_pos}')
+                return None, metadata
+        
+        except Exception as e:
+            self.get_logger().warn(f'IK service error: {e}')
+            return None, {'error': str(e)}
 
     # ── Snap-to-reachable fallback ────────────────────────────────────────────
 
@@ -1980,7 +1990,8 @@ class IkTeleopNode(Node):
             f'snaps={snaps} pos_only={pos_only_fb} vel_clamps={vel_clamps} '
             f'jump_rej={jump_rejects} deadband={deadbands}  '
             f'seed={last_seed}/{last_seed_kind} pool={last_pool}  '
-            f'valid={last_valid_total}(det={last_valid_det} rand={last_valid_rand} '
+            + (f'moveit_wins={self._moveit_ik_wins}  ' if self._use_moveit_ik else '')
+            + f'valid={last_valid_total}(det={last_valid_det} rand={last_valid_rand} '
             f'under={last_valid_under_jump})  '
             f'local={_fmt_metric(last_continuity)} '
             f'js={_fmt_metric(last_joint_state)} '
