@@ -22,16 +22,22 @@ def seed_kind_from_label(label: str) -> str:
     return 'random' if label.startswith('random') else 'deterministic'
 
 
+def _angle_diff(a: float, b: float) -> float:
+    """Shortest signed angular difference (a − b), result in (−π, π]."""
+    d = float(a) - float(b)
+    return (d + math.pi) % (2 * math.pi) - math.pi
+
+
 def _l2_distance(ref: Optional[Sequence[float]], joints: Sequence[float]) -> float:
     if ref is None:
         return float('inf')
-    return math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(ref, joints)))
+    return math.sqrt(sum(_angle_diff(float(a), float(b)) ** 2 for a, b in zip(ref, joints)))
 
 
 def _max_abs_delta(ref: Optional[Sequence[float]], joints: Sequence[float]) -> Optional[float]:
     if ref is None:
         return None
-    return max(abs(float(a) - float(b)) for a, b in zip(ref, joints))
+    return max(abs(_angle_diff(float(a), float(b))) for a, b in zip(ref, joints))
 
 
 def build_candidate(

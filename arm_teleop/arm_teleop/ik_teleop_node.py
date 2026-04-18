@@ -63,6 +63,7 @@ from moveit_msgs.msg import (
 
 from .ik_selection import (
     IkCandidate,
+    _angle_diff,
     build_candidate,
     choose_best_candidate,
     seed_kind_from_label,
@@ -1649,6 +1650,12 @@ class IkTeleopNode(Node):
             j4_reset    = list(last_solved)
             j4_reset[3] = float(self._q_preferred[3])
             det_seeds.append(('j4_reset', j4_reset))
+        # j4_reset_from_joint_states: same J4=0 reset but starting from hardware
+        # joint_states — gives the solver an independent path to a J4≈0 solution
+        # when last_solved has already drifted toward a flipped branch.
+        j4_reset_js    = list(js_seed)
+        j4_reset_js[3] = float(self._q_preferred[3])
+        det_seeds.append(('j4_reset_js', j4_reset_js))
         det_seeds.append(('joint_states', js_seed))
         det_seeds.append(('zero/home',    zero_seed))
 
@@ -1681,39 +1688,29 @@ class IkTeleopNode(Node):
         # Catches configuration flips (e.g. J4 ±180°) that are geometrically valid
         # but would violently snap the arm mid-motion.
         # Only active after the first solve — initial positioning is unrestricted.
-        #
-        # Exception: when control_orientation is active, 6D IK solutions are
-        # allowed through even with large jumps — the velocity limiter
-        # (max_joint_vel_rad_s) smooths the transition.  Hard-rejecting forces
-        # pos-only fallback, which locks the arm in a configuration that can
-        # never match the target orientation.
+        # Jump distances use shortest-arc angle differences so ±π boundaries are
+        # not treated as a 2π jump.
         jump_rejected = False
         if result is not None and self._max_joint_jump > 0.0 and last_solved is not None:
             max_jump = winner_meta.get('max_jump')
             if max_jump is None:
-                max_jump = max(abs(r - c) for r, c in zip(result, last_solved))
+                max_jump = max(
+                    abs(_angle_diff(r, c)) for r, c in zip(result, last_solved)
+                )
                 winner_meta = dict(winner_meta)
                 winner_meta['max_jump'] = max_jump
             if max_jump > self._max_joint_jump:
-                allow_large_jump = (
-                    is_6d_solve and winner_meta.get('winner_pool') == 'all'
-                )
-                if allow_large_jump:
-                    self.get_logger().debug(
-                        f'[ik] 6D jump allowed  max_jump={max_jump:.3f}rad  '
-                        f'seed={winning_seed}  pool={winner_meta.get("winner_pool", "")}  '
-                        f'vel_limiter will smooth')
-                else:
-                    self.get_logger().debug(
-                        f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
-                        f'seed={winning_seed}  threshold={self._max_joint_jump}')
-                    self._log_csv_row(
-                        t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
-                        target_pos, raw_quat, target_quat,
-                        'JUMP_REJECT', winner_meta, False, list(result), js_seed)
-                    result = None
-                    jump_rejected = True
-                    self._diag_jump_rejects += 1
+                self.get_logger().debug(
+                    f'[ik] jump_reject  max_jump={max_jump:.3f}rad  '
+                    f'seed={winning_seed}  pool={winner_meta.get("winner_pool", "")}  '
+                    f'threshold={self._max_joint_jump}')
+                self._log_csv_row(
+                    t_tick_start, (time.monotonic() - t_tick_start) * 1000, age,
+                    target_pos, raw_quat, target_quat,
+                    'JUMP_REJECT', winner_meta, False, list(result), js_seed)
+                result = None
+                jump_rejected = True
+                self._diag_jump_rejects += 1
 
         # ── Position-only fallback when 6D IK fails ───────────────────────
         # The most common 6D failure is orientation unreachable (wrist singularity

@@ -14,6 +14,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV ROS_DISTRO=humble
+ENV WORKSPACE_IMAGE_PATH=/opt/Engineer2026_Control
+ENV WORKSPACE_HOST_PATH=/workspace/Engineer2026_Control_host
+ENV WORKSPACE_ACTIVE_PATH=/workspace/Engineer2026_Control
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     locales \
@@ -92,10 +95,12 @@ RUN groupadd --gid "${GID}" "${USERNAME}" && \
     usermod -aG dialout,video,plugdev,render,i2c,gpio "${USERNAME}" || true
 
 COPY docker/ros2_humble_arm/ros_entrypoint.sh /ros_entrypoint.sh
+COPY . /opt/Engineer2026_Control
 RUN chmod +x /ros_entrypoint.sh
 
-RUN mkdir -p /workspace/Engineer2026_Control && \
-    chown -R "${UID}:${GID}" /workspace /home/"${USERNAME}"
+RUN mkdir -p /workspace/Engineer2026_Control_host && \
+    ln -s "${WORKSPACE_IMAGE_PATH}" "${WORKSPACE_ACTIVE_PATH}" && \
+    chown -R "${UID}:${GID}" /workspace "${WORKSPACE_IMAGE_PATH}" /home/"${USERNAME}"
 
 USER ${USERNAME}
 WORKDIR /workspace/Engineer2026_Control

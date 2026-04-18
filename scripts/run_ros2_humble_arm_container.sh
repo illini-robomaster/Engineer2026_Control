@@ -119,7 +119,7 @@ DOCKER_ARGS=(
   -e "ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY_VALUE}"
   -e "QT_X11_NO_MITSHM=1"
   -e "LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
-  -v "${REPO_ROOT}:/workspace/Engineer2026_Control"
+  --mount "type=bind,source=${REPO_ROOT},target=/workspace/Engineer2026_Control_host"
   -w /workspace/Engineer2026_Control
   -v /etc/localtime:/etc/localtime:ro
 )

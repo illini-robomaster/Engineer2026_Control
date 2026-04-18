@@ -1,0 +1,16 @@
+.git
+.gitnexus
+.claude
+.vscode
+.idea
+.DS_Store
+
+build/
+install/
+log/
+
+__pycache__/
+*.py[cod]
+arm_vision/.venv/
+.venv/
+.venv-*/
