@@ -1637,12 +1637,15 @@ class IkTeleopNode(Node):
             last_solved = self._last_solved_joints
 
         js_seed   = [joint_pos.get(n, 0.0) for n in self._joint_names]
+        js_seed[3] = 0.0   # Joint4 seed always forced to 0
         zero_seed = [0.0] * self._n_joints
 
         # Deterministic seeds (also used as fallback seeds inside snap search)
         det_seeds: list = []
         if last_solved is not None:
-            det_seeds.append(('last_solved', list(last_solved)))
+            ls_seed    = list(last_solved)
+            ls_seed[3] = 0.0   # Joint4 seed always forced to 0
+            det_seeds.append(('last_solved', ls_seed))
             # J4-reset seed: copy of last_solved with only J4 snapped to
             # q_preferred[3]=0.  Starts near the real robot pose (high
             # convergence probability) but with J4=0°, giving the solver a
@@ -1663,7 +1666,9 @@ class IkTeleopNode(Node):
         seeds_to_try = list(det_seeds)
         lowers, uppers = _joint_limits(self._chain_data)
         for _ in range(self._n_random_seeds):
-            seeds_to_try.append(('random', list(np.random.uniform(lowers, uppers))))
+            rand_seed    = list(np.random.uniform(lowers, uppers))
+            rand_seed[3] = 0.0   # Joint4 seed always forced to 0
+            seeds_to_try.append(('random', rand_seed))
 
         should_log = (t_tick_start - self._ik_fail_log_time) > 2.0
 
